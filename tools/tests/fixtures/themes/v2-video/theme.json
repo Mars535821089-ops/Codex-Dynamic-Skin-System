@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 2,
+  "id": "com.example.video-night",
+  "name": "Video Night",
+  "version": "1.0.0",
+  "capabilities": [
+    "safe-css",
+    "animated-background",
+    "sound-pack"
+  ],
+  "visual": {
+    "kind": "video",
+    "asset": "media/loop.mp4",
+    "poster": "media/poster.webp",
+    "fit": "cover",
+    "opacity": 0.92,
+    "loop": true
+  },
+  "audio": {
+    "ambient": {
+      "source": "visual",
+      "loop": true,
+      "volume": 0.45,
+      "analyze": true
+    },
+    "ui": {
+      "volume": 0.7,
+      "events": {
+        "taskCompleted": "audio/ui/completed.wav",
+        "approvalRequested": "audio/ui/approval.wav",
+        "taskFailed": "audio/ui/error.wav"
+      }
+    }
+  },
+  "styles": "styles/theme.css",
+  "tokens": {
+    "accent": "#8b5cf6",
+    "text": "#f8fafc"
+  }
+}

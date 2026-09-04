@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Voxel acceptance</title>
+<style>
+  html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#07101f}
+  canvas{position:fixed;inset:0;width:100%;height:100%}
+</style>
+<body>
+<canvas id="effect"></canvas>
+<script src="/runtime/module-registry.js"></script>
+<script src="/runtime/voxel-field.js"></script>
+<script>
+(() => {
+  const VALID_MODES = new Set(["silence", "bass", "mid", "treble", "sweep"]);
+  const resources = { created: {}, deleted: {} };
+  const contextErrors = [];
+  const tierTransitions = [];
+  const samples = [];
+  let effect = null;
+  let monitor = null;
+  let activeTier = "full";
+
+  const bump = (bucket, name) => { bucket[name] = (bucket[name] || 0) + 1; };
+  const resourcePairs = [
+    ["createShader", "deleteShader", "shader"], ["createProgram", "deleteProgram", "program"],
+    ["createBuffer", "deleteBuffer", "buffer"], ["createVertexArray", "deleteVertexArray", "vertexArray"],
+    ["createTexture", "deleteTexture", "texture"], ["createFramebuffer", "deleteFramebuffer", "framebuffer"],
+  ];
+  for (const [createName, deleteName, label] of resourcePairs) {
+    const prototype = globalThis.WebGL2RenderingContext?.prototype;
+    if (!prototype?.[createName] || prototype[createName].__voxelAcceptanceWrapped) continue;
+    const create = prototype[createName];
+    const destroy = prototype[deleteName];
+    const wrappedCreate = function(...args) { const value = create.apply(this, args); if (value) bump(resources.created, label); return value; };
+    wrappedCreate.__voxelAcceptanceWrapped = true;
+    prototype[createName] = wrappedCreate;
+    if (destroy) prototype[deleteName] = function(value, ...args) { if (value) bump(resources.deleted, label); return destroy.call(this, value, ...args); };
+  }
+
+  function signal(mode) {
+    const bands = new Float32Array(32);
+    return {
+      sample(time) {
+        bands.fill(mode === "silence" ? 0.08 : 0.035);
+        const index = mode === "bass" ? 2 : mode === "mid" ? 15 : mode === "treble" ? 29
+          : Math.floor((time / 40) % bands.length);
+        if (mode !== "silence") {
+          for (let offset = -2; offset <= 2; offset += 1) {
+            const position = Math.max(0, Math.min(31, index + offset));
+            bands[position] = Math.max(bands[position], 0.92 - Math.abs(offset) * 0.18);
+          }
+        }
+        return bands;
+      },
+    };
+  }
+
+  globalThis.__startVoxelAcceptance = async ({ mode, tier, reducedMotion }) => {
+    if (!VALID_MODES.has(mode)) throw new Error("Invalid signal mode");
+    activeTier = reducedMotion ? "static" : tier;
+    tierTransitions.push({ tier: activeTier, reason: reducedMotion ? "reduced-motion" : "requested" });
+    const canvas = document.querySelector("#effect");
+    const media = { effectCanvas: () => canvas, setTier(next) {
+      if (next !== activeTier) tierTransitions.push({ tier: next, reason: "runtime" });
+      activeTier = next;
+    } };
+    const policy = {
+      tier: () => activeTier,
+      observeFrame: () => activeTier,
+      forceFallback(reason) { media.setTier(activeTier === "static" ? "static" : "media"); return { tier: activeTier, reason }; },
+    };
+    const factory = globalThis.__CODEX_DYNAMIC_SKIN_MODULES__.get("voxel-field");
+    effect = factory({ document, window }).create({
+      config: { generation: "acceptance-seed-1", theme: { effect: { parameters: {
+        gridSize: 48, height: 2.2, bloom: 0.35, smoothing: 0.68,
+        palette: ["#8b5cf6", "#22d3ee", "#f472b6"],
+      } } } },
+      modules: new Map([["media-layer", media], ["signal-model", signal(mode)], ["performance-policy", policy]]),
+      ledger: { track() {} },
+    });
+    canvas.addEventListener("webglcontextlost", () => contextErrors.push("webglcontextlost"));
+    await effect.prepare();
+    await effect.ready();
+    await effect.commit();
+    let previous = performance.now();
+    const tick = (now) => { samples.push(now - previous); previous = now; monitor = requestAnimationFrame(tick); };
+    monitor = requestAnimationFrame(tick);
+    return globalThis.__voxelAcceptanceSnapshot();
+  };
+
+  globalThis.__voxelAcceptanceSnapshot = () => ({
+    sampleCount: samples.length,
+    frameTimes: samples.slice(),
+    diagnostics: effect?.diagnostics?.() || null,
+    contextErrors: contextErrors.slice(),
+    tierTransitions: tierTransitions.slice(),
+    resources: structuredClone(resources),
+  });
+
+  globalThis.__finishVoxelAcceptance = async () => {
+    if (monitor !== null) cancelAnimationFrame(monitor);
+    monitor = null;
+    await effect?.destroy?.();
+    return globalThis.__voxelAcceptanceSnapshot();
+  };
+})();
+</script>
+</body>
+</html>

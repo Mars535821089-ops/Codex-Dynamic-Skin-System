@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "com.example.v1-static",
+  "name": "V1 Static",
+  "image": "background.webp",
+  "tagline": "Legacy renderer copy stays available.",
+  "colors": {
+    "background": "#071116",
+    "panel": "#0b1a20",
+    "panelAlt": "#10272c",
+    "accent": "#7cff46",
+    "accentAlt": "#b8ff3d",
+    "secondary": "#36d7e8",
+    "highlight": "#642a8c",
+    "text": "#e9fff1",
+    "muted": "#9ebdb3",
+    "line": "#33505a"
+  }
+}

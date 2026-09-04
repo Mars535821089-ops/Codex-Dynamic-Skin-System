@@ -1,0 +1,55 @@
+{
+  "schema": "codex-dynamic-skin-runtime/1",
+  "modules": [
+    {
+      "name": "module-registry.js",
+      "path": "dynamic/browser/module-registry.js",
+      "sha256": "c018225d2929bcd59b88595a77c9a66086cceb7b69b2dccc59cc10a2020c3996"
+    },
+    {
+      "name": "media-layer.js",
+      "path": "dynamic/browser/media-layer.js",
+      "sha256": "5d2a02506f06fa06971afc75bd69ad51614a5b2e0e03ee499234314a379906d9"
+    },
+    {
+      "name": "audio-bus.js",
+      "path": "dynamic/browser/audio-bus.js",
+      "sha256": "19f5efa7858239d634198533b039faec86b167fa05790fcdf917fe07e4202d63"
+    },
+    {
+      "name": "performance-policy.js",
+      "path": "dynamic/browser/performance-policy.js",
+      "sha256": "20cff82f86d950d7619ffeb8c26d5956b99f03e53027ff44b36d2f330b4f50e0"
+    },
+    {
+      "name": "signal-model.js",
+      "path": "dynamic/browser/signal-model.js",
+      "sha256": "60fca83b3ed190f246d3cb6a2013967329abc568bf35c6ea0be6e3c3cc46e63a"
+    },
+    {
+      "name": "voxel-field.js",
+      "path": "dynamic/browser/voxel-field.js",
+      "sha256": "efd0eee61c2283d7a7463c6f14810bb776ffe15c612ecbc637c44355cf2a1b32"
+    },
+    {
+      "name": "semantic-events.js",
+      "path": "dynamic/browser/semantic-events.js",
+      "sha256": "e2c565a710ab14cdfdb893ae918438af6bcf3c66bb87a7ec8afb0a7d101da146"
+    },
+    {
+      "name": "controls.js",
+      "path": "dynamic/browser/controls.js",
+      "sha256": "b8b920dcd4032092f9c883300da92b2651b9d29a2e2a18c5833e907ded21addb"
+    },
+    {
+      "name": "controller.js",
+      "path": "dynamic/browser/controller.js",
+      "sha256": "25d39f26a7a5f8617d3a0d0aa69ee99dc63eb32dcf383486831fe97dcef726fd"
+    },
+    {
+      "name": "entry.js",
+      "path": "dynamic/browser/entry.js",
+      "sha256": "221295d2c66bfb5ca6c203eac8f831f270a7036e8f67ef941d1dfdd216a4ce1e"
+    }
+  ]
+}

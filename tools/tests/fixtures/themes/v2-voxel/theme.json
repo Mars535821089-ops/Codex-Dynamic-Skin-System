@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 2,
+  "id": "com.example.voxel-night",
+  "name": "Voxel Night",
+  "version": "1.0.0",
+  "capabilities": [
+    "safe-css",
+    "animated-background",
+    "sound-pack",
+    "builtin-effect"
+  ],
+  "visual": {
+    "kind": "builtin-effect",
+    "effect": "voxel-field",
+    "fallback": {
+      "video": "media/fallback.mp4",
+      "poster": "media/poster.webp"
+    },
+    "fit": "cover",
+    "opacity": 0.92
+  },
+  "audio": {
+    "ambient": {
+      "source": "visual",
+      "loop": true,
+      "volume": 0.45,
+      "analyze": true
+    },
+    "ui": {
+      "volume": 0.7,
+      "events": {
+        "taskCompleted": "audio/ui/completed.wav"
+      }
+    }
+  },
+  "effect": {
+    "id": "voxel-field",
+    "source": "ambient",
+    "parameters": {
+      "gridSize": 48,
+      "height": 3.2,
+      "smoothing": 0.72,
+      "bloom": 0.35,
+      "palette": [
+        "#8b5cf6",
+        "#22d3ee",
+        "#f472b6"
+      ]
+    }
+  },
+  "styles": "styles/theme.css"
+}

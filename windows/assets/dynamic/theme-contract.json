@@ -1,0 +1,376 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://codex-dynamic-skin.local/schema/theme-v2.json",
+  "title": "Codex Dynamic Skin Theme v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "name",
+    "version",
+    "capabilities",
+    "visual",
+    "audio"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 2
+    },
+    "id": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "version": {
+      "type": "string",
+      "minLength": 5,
+      "maxLength": 64,
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?(?:\\+([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$"
+    },
+    "capabilities": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 4,
+      "items": {
+        "enum": [
+          "safe-css",
+          "animated-background",
+          "sound-pack",
+          "builtin-effect"
+        ]
+      }
+    },
+    "visual": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "asset"
+          ],
+          "properties": {
+            "kind": {
+              "const": "image"
+            },
+            "asset": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 240
+            },
+            "fit": {
+              "enum": [
+                "cover",
+                "contain",
+                "adaptive"
+              ]
+            },
+            "opacity": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "asset"
+          ],
+          "properties": {
+            "kind": {
+              "const": "video"
+            },
+            "asset": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 240
+            },
+            "poster": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 240
+            },
+            "fit": {
+              "enum": [
+                "cover",
+                "contain",
+                "adaptive"
+              ]
+            },
+            "opacity": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "overscan": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 1.25
+            },
+            "loop": {
+              "type": "boolean"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "effect",
+            "fallback"
+          ],
+          "properties": {
+            "kind": {
+              "const": "builtin-effect"
+            },
+            "effect": {
+              "enum": [
+                "voxel-field"
+              ]
+            },
+            "fallback": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "poster"
+              ],
+              "properties": {
+                "video": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240
+                },
+                "poster": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240
+                }
+              }
+            },
+            "fit": {
+              "enum": [
+                "cover",
+                "contain",
+                "adaptive"
+              ]
+            },
+            "opacity": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        }
+      ]
+    },
+    "audio": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ambient",
+        "ui"
+      ],
+      "properties": {
+        "ambient": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source"
+          ],
+          "properties": {
+            "source": {
+              "enum": [
+                "visual",
+                "asset",
+                "none"
+              ]
+            },
+            "asset": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 240
+            },
+            "loop": {
+              "type": "boolean"
+            },
+            "volume": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "analyze": {
+              "type": "boolean"
+            }
+          }
+        },
+        "ui": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "events"
+          ],
+          "properties": {
+            "volume": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "events": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "taskCompleted": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240
+                },
+                "approvalRequested": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240
+                },
+                "taskFailed": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "effect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "source"
+      ],
+      "properties": {
+        "id": {
+          "enum": [
+            "voxel-field"
+          ]
+        },
+        "source": {
+          "enum": [
+            "ambient",
+            "none"
+          ]
+        },
+        "parameters": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "gridSize": {
+              "type": "integer",
+              "minimum": 8,
+              "maximum": 64
+            },
+            "height": {
+              "type": "number",
+              "minimum": 0.1,
+              "maximum": 8
+            },
+            "smoothing": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 0.98
+            },
+            "bloom": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "palette": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 8,
+              "items": {
+                "type": "string",
+                "pattern": "^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$"
+              }
+            }
+          }
+        }
+      }
+    },
+    "styles": {
+      "type": "string"
+    },
+    "tokens": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "background": {
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$"
+        },
+        "panel": {
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$"
+        },
+        "accent": {
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$"
+        },
+        "accentAlt": {
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$"
+        },
+        "text": {
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$"
+        },
+        "muted": {
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$"
+        },
+        "line": {
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$"
+        }
+      }
+    }
+  },
+  "x-semanticUiEvents": [
+    "taskCompleted",
+    "approvalRequested",
+    "taskFailed"
+  ],
+  "x-builtinEffects": [
+    "voxel-field"
+  ],
+  "x-limits": {
+    "zipCompressedBytes": 134217728,
+    "zipExpandedBytes": 268435456,
+    "zipEntries": 64,
+    "singleEntryBytes": 100663296,
+    "imageBytes": 16777216,
+    "imageDimension": 8192,
+    "imagePixels": 40000000,
+    "videoBytes": 100663296,
+    "videoSeconds": 60,
+    "videoWidth": 3840,
+    "videoHeight": 2160,
+    "videoFps": 60,
+    "ambientBytes": 33554432,
+    "ambientSeconds": 900,
+    "uiClipBytes": 2097152,
+    "uiClipSeconds": 10,
+    "uiClipCount": 32,
+    "textBytes": 262144
+  }
+}
