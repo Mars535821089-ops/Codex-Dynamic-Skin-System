@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import fs from "node:fs/promises";
 import http from "node:http";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const injectorPath = path.resolve(here, "../scripts/injector.mjs");
+const leaseIdentity = `dream-skin-one-shot-test-${process.pid}`;
+const leaseRoot = path.join(os.tmpdir(), `codex-dream-skin-watchers-${leaseIdentity}`);
 let versionRequests = 0;
 let port = 0;
 
@@ -39,7 +43,10 @@ const runMode = (mode) => new Promise((resolve, reject) => {
     "--port", String(port),
     "--browser-id", "test-browser",
     "--timeout-ms", "250",
-  ], { stdio: ["ignore", "pipe", "pipe"] });
+  ], {
+    stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, USERNAME: leaseIdentity, USER: leaseIdentity },
+  });
   let stdout = "";
   let stderr = "";
   child.stdout.setEncoding("utf8");
@@ -52,15 +59,19 @@ const runMode = (mode) => new Promise((resolve, reject) => {
 
 try {
   for (const mode of ["--verify", "--once", "--remove"]) {
+    const initializingLease = path.join(leaseRoot, `port-${port}.lock`);
+    if (mode === "--once") await fs.mkdir(initializingLease, { recursive: true });
     const requestsBefore = versionRequests;
     const result = await runMode(mode);
     assert.notEqual(result.code, 0, `${mode} should time out because the fixture exposes no page targets.`);
     assert.ok(versionRequests > requestsBefore,
-      `${mode} must pass its expected Browser ID into one-shot target discovery.`);
+      `${mode} must validate its expected Browser ID before any mutation preflight.\n${result.stdout}\n${result.stderr}`);
+    if (mode === "--once") await fs.rm(initializingLease, { recursive: true, force: true });
     assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /options is not defined/,
       `${mode} must not reference a CLI options binding outside its lexical scope.`);
   }
 } finally {
+  await fs.rm(leaseRoot, { recursive: true, force: true });
   await new Promise((resolve) => server.close(resolve));
 }
 

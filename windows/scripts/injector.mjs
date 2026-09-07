@@ -461,22 +461,7 @@ async function fetchCdpJson(port, resource) {
   }
 }
 
-async function listAppTargets(port, expectedBrowserId = null) {
-  const targets = await fetchCdpJson(port, "/json/list");
-  if (!Array.isArray(targets)) throw new Error("CDP target list is not an array");
-  if (expectedBrowserId) {
-    const version = await fetchCdpJson(port, "/json/version");
-    const actualBrowserId = browserIdFromVersion(version, port);
-    if (actualBrowserId !== expectedBrowserId) {
-      throw new CdpIdentityMismatchError(
-        `CDP browser identity changed from ${expectedBrowserId} to ${actualBrowserId}`,
-      );
-    }
-  }
-  return targets.filter((item) => isValidCdpPageTarget(item, port));
-}
-
-async function connectBrowserIdentityAnchor(port, expectedBrowserId) {
+async function validateBrowserIdentity(port, expectedBrowserId) {
   const version = await fetchCdpJson(port, "/json/version");
   const actualBrowserId = browserIdFromVersion(version, port);
   if (actualBrowserId !== expectedBrowserId) {
@@ -484,6 +469,18 @@ async function connectBrowserIdentityAnchor(port, expectedBrowserId) {
       `CDP browser identity changed from ${expectedBrowserId} to ${actualBrowserId}`,
     );
   }
+  return version;
+}
+
+async function listAppTargets(port, expectedBrowserId = null) {
+  const targets = await fetchCdpJson(port, "/json/list");
+  if (!Array.isArray(targets)) throw new Error("CDP target list is not an array");
+  if (expectedBrowserId) await validateBrowserIdentity(port, expectedBrowserId);
+  return targets.filter((item) => isValidCdpPageTarget(item, port));
+}
+
+async function connectBrowserIdentityAnchor(port, expectedBrowserId) {
+  const version = await validateBrowserIdentity(port, expectedBrowserId);
   return new BrowserIdentityAnchor(validatedDebuggerUrl(version, port)).open();
 }
 
@@ -2375,6 +2372,7 @@ async function runWatch(options) {
 
 async function runExclusiveOneShot(options) {
   const mutatesRenderer = options.mode === "once" || options.mode === "remove" || options.reload;
+  if (mutatesRenderer) await validateBrowserIdentity(options.port, options.browserId);
   const lease = mutatesRenderer ? await acquireWatcherLease({ port: options.port }) : null;
   try {
     await runOneShot(options);
