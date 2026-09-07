@@ -94,6 +94,7 @@ function Invoke-DreamSkinStartupFixture {
   }
   function Test-DreamSkinPendingAppearanceTransaction { param([string]$BackupPath); return $false }
   function Read-DreamSkinState { param([string]$Path); return $null }
+  function Test-DreamSkinStateProfileMatch { param([object]$State, [string]$ProfilePath); return $true }
   function Get-DreamSkinCodexStatePathCandidate { param([object]$State); return $null }
   function Get-DreamSkinCodexInstallFromState { param([object]$State); return $null }
   function Test-DreamSkinPathEqual { param([string]$Left, [string]$Right); return $true }

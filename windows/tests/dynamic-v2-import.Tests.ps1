@@ -98,8 +98,25 @@ try {
     (($theme | ConvertTo-Json -Depth 12) + "`n"),
     [System.Text.UTF8Encoding]::new($false)
   )
-  Add-Type -AssemblyName System.IO.Compression.FileSystem
-  [System.IO.Compression.ZipFile]::CreateFromDirectory($sourceRoot, $archivePath)
+  Add-Type -AssemblyName System.IO.Compression
+  $archiveStream = [System.IO.File]::Open($archivePath, [System.IO.FileMode]::CreateNew)
+  $archive = [System.IO.Compression.ZipArchive]::new(
+    $archiveStream,
+    [System.IO.Compression.ZipArchiveMode]::Create,
+    $false
+  )
+  try {
+    foreach ($sourceFile in @(Get-ChildItem -LiteralPath $sourceRoot -File -Recurse)) {
+      $relative = $sourceFile.FullName.Substring($sourceRoot.Length).TrimStart('\', '/').Replace('\', '/')
+      $entry = $archive.CreateEntry($relative, [System.IO.Compression.CompressionLevel]::Optimal)
+      $input = $sourceFile.OpenRead()
+      $output = $entry.Open()
+      try { $input.CopyTo($output) } finally { $output.Dispose(); $input.Dispose() }
+    }
+  } finally {
+    $archive.Dispose()
+    $archiveStream.Dispose()
+  }
 
   $imported = Import-DreamSkinThemeZip -ArchivePath $archivePath -StateRoot $stateRoot
   if ($imported.Status -cne 'Imported' -or $imported.Id -cne 'test.windows.dynamic-v2') {

@@ -192,12 +192,27 @@ function Write-TestOfficialThemePack {
 function New-TestZipFromDirectory {
   param([Parameter(Mandatory = $true)][string]$Source, [Parameter(Mandatory = $true)][string]$Archive)
   if (Test-Path -LiteralPath $Archive) { Remove-Item -LiteralPath $Archive -Force }
-  [System.IO.Compression.ZipFile]::CreateFromDirectory(
-    $Source,
-    $Archive,
-    [System.IO.Compression.CompressionLevel]::Optimal,
+  $archiveStream = [System.IO.File]::Open($Archive, [System.IO.FileMode]::CreateNew)
+  $zip = [System.IO.Compression.ZipArchive]::new(
+    $archiveStream,
+    [System.IO.Compression.ZipArchiveMode]::Create,
     $false
   )
+  try {
+    foreach ($sourceFile in @(Get-ChildItem -LiteralPath $Source -File -Recurse)) {
+      # .NET Framework writes platform separators from CreateFromDirectory.
+      # Construct every fixture entry explicitly so PS 5.1 and pwsh exercise
+      # the same portable archive contract enforced for public theme packs.
+      $relative = $sourceFile.FullName.Substring($Source.Length).TrimStart('\', '/').Replace('\', '/')
+      $entry = $zip.CreateEntry($relative, [System.IO.Compression.CompressionLevel]::Optimal)
+      $input = $sourceFile.OpenRead()
+      $output = $entry.Open()
+      try { $input.CopyTo($output) } finally { $output.Dispose(); $input.Dispose() }
+    }
+  } finally {
+    $zip.Dispose()
+    $archiveStream.Dispose()
+  }
 }
 
 function New-TestZipWithEntry {
