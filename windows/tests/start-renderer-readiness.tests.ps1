@@ -206,7 +206,7 @@ try {
 $announcedActive = @($script:hostMessages | Where-Object {
   $_ -like 'Codex Dream Skin is active*'
 }).Count -gt 0
-if (-not $failed -or $script:verifyCalls -ne 1 -or $script:onceCalls -ne 1 -or
+if (-not $failed -or $script:verifyCalls -ne 1 -or $script:onceCalls -ne 0 -or
   $script:removeCalls -ne 0 -or $script:appearanceInstallCalls -ne 1 -or
   $script:appearanceRestoreCalls -ne 1 -or -not $script:codexStopped -or
   -not $script:codexStarted -or

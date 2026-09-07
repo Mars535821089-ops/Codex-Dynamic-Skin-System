@@ -31,7 +31,11 @@ run_shell_test() {
   /usr/bin/printf 'FAIL: %s (exit %s)\n' "$label" "$status" >&2
   return "$status"
 }
-run_shell_test 'macOS community import identity' "$ROOT/macos/tests/theme-import-identity.test.sh"
+if [ "${CODEX_DREAM_SKIN_SKIP_SIGNED_RUNTIME_TESTS:-0}" = "1" ]; then
+  /usr/bin/printf 'SKIP: macOS community import identity requires an installed, signed Codex runtime\n'
+else
+  run_shell_test 'macOS community import identity' "$ROOT/macos/tests/theme-import-identity.test.sh"
+fi
 run_shell_test 'macOS restore lifecycle transaction' "$ROOT/macos/tests/restore-lifecycle-transaction.test.sh"
 while IFS= read -r script; do /bin/bash -n "$script"; done < <(
   /usr/bin/find "$ROOT/macos" -type f -name '*.sh' -print

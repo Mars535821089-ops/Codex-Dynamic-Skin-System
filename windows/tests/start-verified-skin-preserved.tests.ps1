@@ -34,7 +34,6 @@ if ($rawSource.Contains('$PSScriptRoot')) {
 function Invoke-DreamSkinStartupFixture {
   param(
     [Parameter(Mandatory = $true)][string[]]$VerifyPayloads,
-    [Parameter(Mandatory = $true)][string]$OncePayload,
     [switch]$ReuseExistingCdp,
     [switch]$WithResultToken
   )
@@ -54,7 +53,6 @@ function Invoke-DreamSkinStartupFixture {
   $script:removeCalls = 0
   $script:verifyPayloads = @($VerifyPayloads)
   $script:verifyPayloadIndex = 0
-  $script:oncePayload = $OncePayload
   $script:lastError = '(no error)'
   $script:resultAppearanceRecovery = $null
 
@@ -172,9 +170,6 @@ function Invoke-DreamSkinStartupFixture {
       $script:verifyPayloadIndex += 1
       return [pscustomobject]@{ ExitCode = 2; Output = @($script:verifyPayloads[$index]) }
     }
-    if ($ArgumentList -contains '--once') {
-      return [pscustomobject]@{ ExitCode = 2; Output = @($script:oncePayload) }
-    }
     if ($ArgumentList -contains '--remove') {
       $script:removeCalls += 1
       return [pscustomobject]@{ ExitCode = 0; Output = @() }
@@ -265,7 +260,7 @@ $hiddenPayload = @'
 $malformedPayload = '{not-json'
 
 $rendered = Invoke-DreamSkinStartupFixture `
-  -VerifyPayloads @($renderedPayload, $malformedPayload) -OncePayload $malformedPayload
+  -VerifyPayloads @($renderedPayload, $malformedPayload)
 if (-not $rendered.Failed) {
   throw 'A failed verify must still abort startup even when the skin is rendered.'
 }
@@ -276,15 +271,8 @@ if ($rendered.AppearanceInstallCalls -ne 1 -or $rendered.AppearanceRestoreCalls 
   throw 'Rendered-but-unverified startup did not retain its applied appearance transaction.'
 }
 
-$onceRendered = Invoke-DreamSkinStartupFixture `
-  -VerifyPayloads @($malformedPayload, $malformedPayload) -OncePayload $renderedPayload
-if (-not $onceRendered.Failed -or $onceRendered.CodexStopped -or
-  $onceRendered.AppearanceRestoreCalls -ne 0) {
-  throw 'Visible evidence returned by the one-shot injection was not latched.'
-}
-
 $communityRendered = Invoke-DreamSkinStartupFixture `
-  -VerifyPayloads @($renderedPayload, $malformedPayload) -OncePayload $malformedPayload `
+  -VerifyPayloads @($renderedPayload, $malformedPayload) `
   -WithResultToken
 if (-not $communityRendered.Failed -or -not $communityRendered.CodexStopped -or
   -not $communityRendered.CodexStarted -or $communityRendered.AppearanceRestoreCalls -ne 1 -or
@@ -293,14 +281,14 @@ if (-not $communityRendered.Failed -or -not $communityRendered.CodexStopped -or
 }
 
 $broken = Invoke-DreamSkinStartupFixture `
-  -VerifyPayloads @($hiddenPayload, $malformedPayload) -OncePayload $hiddenPayload
+  -VerifyPayloads @($hiddenPayload, $malformedPayload)
 if (-not $broken.Failed -or -not $broken.CodexStopped -or -not $broken.CodexStarted -or
   $broken.AppearanceRestoreCalls -ne 1) {
   throw 'A genuinely hidden renderer no longer closes Codex and restores appearance.'
 }
 
 $reused = Invoke-DreamSkinStartupFixture `
-  -VerifyPayloads @($renderedPayload, $malformedPayload) -OncePayload $malformedPayload `
+  -VerifyPayloads @($renderedPayload, $malformedPayload) `
   -ReuseExistingCdp
 if (-not $reused.Failed -or $reused.CodexStopped -or $reused.CodexStarted -or
   $reused.AppearanceInstallCalls -ne 0 -or $reused.AppearanceRestoreCalls -ne 0 -or
@@ -309,7 +297,7 @@ if (-not $reused.Failed -or $reused.CodexStopped -or $reused.CodexStarted -or
 }
 
 $reusedHidden = Invoke-DreamSkinStartupFixture `
-  -VerifyPayloads @($hiddenPayload, $malformedPayload) -OncePayload $hiddenPayload `
+  -VerifyPayloads @($hiddenPayload, $malformedPayload) `
   -ReuseExistingCdp
 if (-not $reusedHidden.Failed -or $reusedHidden.CodexStopped -or
   $reusedHidden.CodexStarted -or $reusedHidden.AppearanceInstallCalls -ne 0 -or
