@@ -9,6 +9,7 @@ import {
   runtimeThemeContentFingerprint,
   runtimeThemeTreeFingerprint,
 } from "./theme-content-fingerprint.mjs";
+import { syncDirectory } from "./durable-directory-sync.mjs";
 
 const cliArgs = process.argv.slice(2);
 const recoveryOnly = cliArgs[0] === "--recover";
@@ -432,15 +433,6 @@ async function resolveRealDirectory(directory, label) {
     throw new Error(`${label} must be a real directory`);
   }
   return resolved;
-}
-
-async function syncDirectory(directory) {
-  const handle = await fs.open(directory, fsConstants.O_RDONLY);
-  try {
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
 }
 
 async function syncDirectoryTree(root) {

@@ -77,6 +77,11 @@ function Initialize-DreamSkinThemeStore {
   return Get-DreamSkinThemePaths -StateRoot $StateRoot
 }
 function Test-DreamSkinPaused { param([string]$StateRoot); return $false }
+function Test-DreamSkinBackgroundPlaybackEnabled { param([string]$StateRoot); return $false }
+function Test-DreamSkinBackgroundPlaybackCapable {
+  param([object]$Codex, [string]$ProfilePath)
+  return $false
+}
 function Test-DreamSkinPendingAppearanceTransaction { param([string]$BackupPath); return $false }
 function Read-DreamSkinState { param([string]$Path); return $null }
 function Get-DreamSkinCodexStatePathCandidate { param([object]$State); return $null }
@@ -184,11 +189,13 @@ function Write-Host {
 $originalLocalAppData = $env:LOCALAPPDATA
 $env:LOCALAPPDATA = Join-Path ([System.IO.Path]::GetTempPath()) 'dreamskin-start-readiness-fixture'
 $failed = $false
+$failureMessage = '(none)'
 try {
   $startBlock = [scriptblock]::Create($source)
   try {
     & $startBlock -Port 9335
   } catch {
+    $failureMessage = $_.Exception.Message
     $failed = $_.Exception.Message -like 'Dream Skin verification failed.*'
   }
 } finally {
@@ -205,7 +212,7 @@ if (-not $failed -or $script:verifyCalls -ne 1 -or $script:onceCalls -ne 1 -or
   -not $script:stateWritten -or -not $script:stateRemoved -or
   -not $script:daemonStopped -or -not $script:daemon.HasExited -or
   -not $script:lockExited -or $announcedActive) {
-  throw 'A failed renderer readiness check did not stop startup and run the existing rollback path.'
+  throw "A failed renderer readiness check did not stop startup and run the existing rollback path. Cause: $failureMessage; verify=$script:verifyCalls; once=$script:onceCalls; remove=$script:removeCalls; appearance=$script:appearanceInstallCalls/$script:appearanceRestoreCalls; stopped=$script:codexStopped; started=$script:codexStarted; state=$script:stateWritten/$script:stateRemoved; daemon=$script:daemonStopped/$($script:daemon.HasExited); lock=$script:lockExited; active=$announcedActive"
 }
 
 Write-Output 'PASS: renderer readiness failure stops Windows startup and clears transient state.'

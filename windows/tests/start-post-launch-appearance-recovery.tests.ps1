@@ -65,6 +65,11 @@ function Initialize-DreamSkinThemeStore {
   return Get-DreamSkinThemePaths -StateRoot $StateRoot
 }
 function Test-DreamSkinPaused { param([string]$StateRoot); return $false }
+function Test-DreamSkinBackgroundPlaybackEnabled { param([string]$StateRoot); return $false }
+function Test-DreamSkinBackgroundPlaybackCapable {
+  param([object]$Codex, [string]$ProfilePath)
+  return $false
+}
 function Test-DreamSkinPendingAppearanceTransaction { param([string]$BackupPath); return $false }
 function Read-DreamSkinState { param([string]$Path); return $null }
 function Get-DreamSkinCodexStatePathCandidate { param([object]$State); return $null }
@@ -182,7 +187,7 @@ try {
     $pause.Events -cne 'launch,stop,restore,start' -or
     $pause.InstallCalls -ne 1 -or $pause.RestoreCalls -ne 1 -or
     $pause.LockEnters -ne 1 -or $pause.LockExits -ne 1) {
-    throw 'Pause-clear failure did not close Codex, restore appearance, and reopen normally.'
+    throw "Pause-clear failure did not close Codex, restore appearance, and reopen normally. Cause: $($pause.Failure.Exception.Message); events=$($pause.Events); install=$($pause.InstallCalls); restore=$($pause.RestoreCalls); locks=$($pause.LockEnters)/$($pause.LockExits)"
   }
 
   $foreground = Invoke-PostLaunchFailureFixture -Scenario 'foreground'
@@ -191,7 +196,7 @@ try {
     $foreground.Events -cne 'launch,stop,restore,start' -or
     $foreground.InstallCalls -ne 1 -or $foreground.RestoreCalls -ne 1 -or
     $foreground.LockEnters -ne 2 -or $foreground.LockExits -ne 2) {
-    throw 'Immediate foreground failure did not reacquire the lock and restore this launch.'
+    throw "Immediate foreground failure did not reacquire the lock and restore this launch. Cause: $($foreground.Failure.Exception.Message); events=$($foreground.Events); install=$($foreground.InstallCalls); restore=$($foreground.RestoreCalls); locks=$($foreground.LockEnters)/$($foreground.LockExits)"
   }
 
   $superseded = Invoke-PostLaunchFailureFixture -Scenario 'foreground-superseded'

@@ -87,6 +87,11 @@ function Invoke-DreamSkinStartupFixture {
     return Get-DreamSkinThemePaths -StateRoot $StateRoot
   }
   function Test-DreamSkinPaused { param([string]$StateRoot); return $false }
+  function Test-DreamSkinBackgroundPlaybackEnabled { param([string]$StateRoot); return $false }
+  function Test-DreamSkinBackgroundPlaybackCapable {
+    param([object]$Codex, [string]$ProfilePath)
+    return $false
+  }
   function Test-DreamSkinPendingAppearanceTransaction { param([string]$BackupPath); return $false }
   function Read-DreamSkinState { param([string]$Path); return $null }
   function Get-DreamSkinCodexStatePathCandidate { param([object]$State); return $null }

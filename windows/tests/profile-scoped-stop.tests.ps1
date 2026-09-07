@@ -34,13 +34,23 @@ try {
   if (Test-DreamSkinStateProfileMatch -State ([pscustomobject]@{}) -ProfilePath $profileA) {
     throw 'Legacy default-profile state incorrectly matched an explicit profile.'
   }
-  Add-Type -TypeDefinition @'
+  $fixtureSource = Join-Path $fixtureRoot 'Program.cs'
+  [System.IO.File]::WriteAllText($fixtureSource, @'
 using System;
 using System.Threading;
 public static class Program {
   public static void Main(string[] args) { Thread.Sleep(TimeSpan.FromMinutes(2)); }
 }
-'@ -OutputAssembly $fixtureExecutable -OutputType ConsoleApplication
+'@, [System.Text.UTF8Encoding]::new($false))
+  $compiler = @(
+    (Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'),
+    (Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe')
+  ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+  if (-not $compiler) { throw 'The disposable fixture C# compiler is unavailable.' }
+  & $compiler '/nologo' '/target:exe' "/out:$fixtureExecutable" $fixtureSource
+  if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $fixtureExecutable)) {
+    throw "The disposable fixture failed to compile (exit code $LASTEXITCODE)."
+  }
 
   $processA = Start-Process -FilePath $fixtureExecutable `
     -ArgumentList ('"--user-data-dir=' + $profileA + '"') -PassThru

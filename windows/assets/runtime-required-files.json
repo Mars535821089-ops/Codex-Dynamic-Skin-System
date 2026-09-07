@@ -38,6 +38,7 @@
     "scripts\\check-update.ps1",
     "scripts\\common-windows.ps1",
     "scripts\\config-utf8.ps1",
+    "scripts\\durable-directory-sync.mjs",
     "scripts\\image-metadata.mjs",
     "scripts\\injector.mjs",
     "scripts\\install-dream-skin.ps1",
