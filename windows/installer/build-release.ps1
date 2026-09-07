@@ -21,19 +21,23 @@ $bootstrapPath = Join-Path $installerRoot 'setup-bootstrap.ps1'
 $versionPath = Join-Path $windowsRoot 'VERSION'
 $macosVersionPath = Join-Path (Join-Path $repositoryRoot 'macos') 'VERSION'
 $macosPackagePath = Join-Path (Join-Path $repositoryRoot 'macos') 'package.json'
+$macosScriptsRoot = Join-Path (Join-Path $repositoryRoot 'macos') 'scripts'
+$macosCommonPath = Join-Path $macosScriptsRoot 'common-macos.sh'
+$macosInjectorPath = Join-Path $macosScriptsRoot 'injector.mjs'
+$windowsInjectorPath = Join-Path (Join-Path $windowsRoot 'scripts') 'injector.mjs'
 $licensePath = Join-Path (Join-Path $repositoryRoot 'macos') 'LICENSE'
 $noticePath = Join-Path (Join-Path $repositoryRoot 'macos') 'NOTICE.md'
 $innoLanguageRoot = Join-Path $installerRoot 'languages'
 $innoChineseLanguagePath = Join-Path $innoLanguageRoot 'ChineseSimplified.isl'
 $innoSetupLicensePath = Join-Path $innoLanguageRoot 'Inno-Setup-License.txt'
-$innoChineseLanguageSha256 = '7d544b9bb1d142cfa11f2e5d3cc8abe2e55f8e066c5124e3772675aa236e1278'
+$innoChineseLanguageSha256 = '75ec648a9c1b547b1c35113b06bc85cede51c1c1d7d089af8fd974331f930570'
 $innoSetupLicenseSha256 = '0c81595601bce47eeef8d865d5da7f9ca2c6a12235b7482b29f5ab23ed02ee5a'
 $publicPresetRoot = Join-Path (Join-Path (Join-Path $repositoryRoot 'macos') 'presets') `
   'preset-gothic-void-crusade'
 $publicPresetImagePath = Join-Path $publicPresetRoot 'background.jpg'
 $publicPresetThemePath = Join-Path $publicPresetRoot 'theme.json'
 $publicPresetImageSha256 = 'b76a7cbe2ff9d923846e931984d243a7ba1f25de8d190b5c6412c809c41aee42'
-$publicPresetThemeSha256 = '8316c6ad29e3b84806358ab4a730c7e063b261e379179b9608cf751c282d66a7'
+$publicPresetThemeSha256 = 'bd55daa3cc9b30ceb5338c30f151d010abee0646d411da86ff9228309c24722a'
 
 function Read-ReleaseTextFile {
   param([Parameter(Mandatory = $true)][string]$Path)
@@ -41,6 +45,30 @@ function Read-ReleaseTextFile {
     throw "Required release input does not exist: $Path"
   }
   return [System.IO.File]::ReadAllText($Path, [System.Text.UTF8Encoding]::new($false))
+}
+
+function Assert-EmbeddedReleaseVersion {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][string]$Pattern,
+    [Parameter(Mandatory = $true)][string]$ExpectedVersion,
+    [Parameter(Mandatory = $true)][string]$Label
+  )
+  $matches = [regex]::Matches(
+    (Read-ReleaseTextFile -Path $Path),
+    $Pattern,
+    [System.Text.RegularExpressions.RegexOptions]::Multiline
+  )
+  if ($matches.Count -ne 1) {
+    throw "$Label must contain exactly one semantic SKIN_VERSION assignment."
+  }
+  $embeddedVersion = $matches[0].Groups[1].Value
+  if ($embeddedVersion -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+    throw "$Label contains an invalid SKIN_VERSION: $embeddedVersion"
+  }
+  if ($embeddedVersion -cne $ExpectedVersion) {
+    throw "Release versions differ: windows=$ExpectedVersion $Label=$embeddedVersion"
+  }
 }
 
 function Read-ReleaseRuntimeFileManifest {
@@ -127,17 +155,27 @@ function Resolve-IsccExecutable {
   throw 'Inno Setup 6 compiler (ISCC.exe) was not found. Install Inno Setup 6 or pass -IsccPath.'
 }
 
-function Copy-ReleaseDirectory {
+function Copy-ReleaseManifestFiles {
   param(
-    [Parameter(Mandatory = $true)][string]$Source,
-    [Parameter(Mandatory = $true)][string]$Destination
+    [Parameter(Mandatory = $true)][string]$SourceRoot,
+    [Parameter(Mandatory = $true)][string]$DestinationRoot,
+    [Parameter(Mandatory = $true)][object[]]$RelativePaths
   )
-  if (-not (Test-Path -LiteralPath $Source -PathType Container)) {
-    throw "Required release directory does not exist: $Source"
-  }
-  New-Item -ItemType Directory -Path $Destination -Force | Out-Null
-  foreach ($item in Get-ChildItem -LiteralPath $Source -Force) {
-    Copy-Item -LiteralPath $item.FullName -Destination $Destination -Recurse -Force -ErrorAction Stop
+  foreach ($relative in $RelativePaths) {
+    $value = "$relative".Replace('/', '\')
+    if ($value -cnotmatch '^(?:assets|scripts)\\') { continue }
+    $source = Join-Path $SourceRoot $value
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+      throw "Manifest-approved release input does not exist: $value"
+    }
+    $item = Get-Item -LiteralPath $source -Force
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+      throw "Manifest-approved release input cannot be a reparse point: $value"
+    }
+    $destination = Join-Path $DestinationRoot $value
+    $parent = Split-Path -Parent $destination
+    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    Copy-Item -LiteralPath $source -Destination $destination -Force -ErrorAction Stop
   }
 }
 
@@ -300,6 +338,12 @@ $macosPackage = (Read-ReleaseTextFile -Path $macosPackagePath) | ConvertFrom-Jso
 if ($macosVersion -cne $version -or "$($macosPackage.version)" -cne $version) {
   throw "Release versions differ: windows=$version macOS=$macosVersion package=$($macosPackage.version)"
 }
+Assert-EmbeddedReleaseVersion -Path $macosCommonPath `
+  -Pattern '^SKIN_VERSION="([^"]+)"$' -ExpectedVersion $version -Label 'macosCommon'
+Assert-EmbeddedReleaseVersion -Path $macosInjectorPath `
+  -Pattern '^const SKIN_VERSION = "([^"]+)";$' -ExpectedVersion $version -Label 'macosInjector'
+Assert-EmbeddedReleaseVersion -Path $windowsInjectorPath `
+  -Pattern '^const SKIN_VERSION = "([^"]+)";$' -ExpectedVersion $version -Label 'windowsInjector'
 
 $manifest = (Read-ReleaseTextFile -Path $manifestPath) | ConvertFrom-Json
 Assert-NodeRuntimeManifest -Manifest $manifest
@@ -364,7 +408,8 @@ try {
     try {
       [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
       Write-Host "Downloading pinned Node.js v$($manifest.version) runtime..."
-      Invoke-WebRequest -UseBasicParsing -Uri "$($manifest.url)" -OutFile $archivePath
+      Invoke-WebRequest -UseBasicParsing -Uri "$($manifest.url)" `
+        -OutFile $archivePath -TimeoutSec 60
     } finally {
       [Net.ServicePointManager]::SecurityProtocol = $previousProtocol
     }
@@ -383,10 +428,14 @@ try {
   $languageRoot = Join-Path $stageRoot 'languages'
   New-Item -ItemType Directory -Path $payloadRoot | Out-Null
   New-Item -ItemType Directory -Path $languageRoot | Out-Null
-  Copy-ReleaseDirectory -Source (Join-Path $windowsRoot 'assets') -Destination (Join-Path $payloadRoot 'assets')
-  Copy-ReleaseDirectory -Source (Join-Path $windowsRoot 'scripts') -Destination (Join-Path $payloadRoot 'scripts')
-  Copy-ReleaseDirectory -Source $publicPresetRoot `
-    -Destination (Join-Path $payloadRoot 'presets\preset-gothic-void-crusade')
+  Copy-ReleaseManifestFiles -SourceRoot $windowsRoot -DestinationRoot $payloadRoot `
+    -RelativePaths @($runtimeFileManifest.required)
+  $stagedPresetRoot = Join-Path $payloadRoot 'presets\preset-gothic-void-crusade'
+  New-Item -ItemType Directory -Path $stagedPresetRoot -Force | Out-Null
+  Copy-Item -LiteralPath $publicPresetImagePath `
+    -Destination (Join-Path $stagedPresetRoot 'background.jpg') -Force
+  Copy-Item -LiteralPath $publicPresetThemePath `
+    -Destination (Join-Path $stagedPresetRoot 'theme.json') -Force
   Copy-Item -LiteralPath $publicPresetImagePath `
     -Destination (Join-Path (Join-Path $payloadRoot 'assets') 'dream-reference.jpg') -Force
   $publicPresetTheme.image = 'dream-reference.jpg'
@@ -405,6 +454,8 @@ try {
   Copy-Item -LiteralPath $noticePath -Destination (Join-Path $stageRoot 'NOTICE.md') -Force
   Copy-Item -LiteralPath $innoChineseLanguagePath `
     -Destination (Join-Path $languageRoot 'ChineseSimplified.isl') -Force
+  Copy-Item -LiteralPath $innoSetupLicensePath `
+    -Destination (Join-Path $languageRoot 'Inno-Setup-License.txt') -Force
 
   Add-Type -AssemblyName System.IO.Compression
   Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -421,9 +472,31 @@ try {
 
   $expectedPayloadFiles = @($runtimeFileManifest.required) +
     @($runtimeFileManifest.packagedAdditions)
+  $expectedPayloadIndex = @{}
   foreach ($relative in $expectedPayloadFiles) {
     if (-not (Test-Path -LiteralPath (Join-Path $payloadRoot $relative) -PathType Leaf)) {
       throw "Staged installer payload is incomplete: $relative"
+    }
+    $expectedPayloadIndex["$relative".Replace('/', '\').ToLowerInvariant()] = $true
+  }
+  $payloadPrefix = [System.IO.Path]::GetFullPath($payloadRoot)
+  if (-not $payloadPrefix.EndsWith([System.IO.Path]::DirectorySeparatorChar.ToString())) {
+    $payloadPrefix += [System.IO.Path]::DirectorySeparatorChar
+  }
+  $actualPayloadFiles = @()
+  foreach ($item in Get-ChildItem -LiteralPath $payloadRoot -Recurse -Force) {
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+      throw "Staged installer payload contains a reparse point: $($item.FullName)"
+    }
+    if ($item.PSIsContainer) { continue }
+    $fullPath = [System.IO.Path]::GetFullPath($item.FullName)
+    if (-not $fullPath.StartsWith($payloadPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+      throw "Staged installer payload escaped its root: $fullPath"
+    }
+    $relative = $fullPath.Substring($payloadPrefix.Length).Replace('/', '\')
+    $actualPayloadFiles += $relative
+    if (-not $expectedPayloadIndex.ContainsKey($relative.ToLowerInvariant())) {
+      throw "Unexpected staged installer payload file: $relative"
     }
   }
   $stagedPublicImage = Join-Path (Join-Path $payloadRoot 'assets') 'dream-reference.jpg'

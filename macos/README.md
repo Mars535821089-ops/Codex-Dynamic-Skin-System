@@ -3,16 +3,20 @@
 ## Requirements
 
 - macOS with the official Codex Desktop application already launched once
-- Node.js 20 or newer for source installation
+- No separate Node.js installation; the installer uses the signed Node.js runtime bundled with Codex
 
 ## Install from source
 
 1. Quit only the Codex instance you intend to theme.
 2. Run `macos/Install Codex Dream Skin.command`.
 3. Run `macos/Customize Codex Dream Skin.command` to import or select a theme.
-4. Run `macos/Restore Codex Dream Skin.command` to remove the injected session and return to the native appearance.
+4. Run `macos/Restore Codex Dream Skin.command` to remove the injected session and restore the pre-install base theme. This explicit launcher reopens Codex when the restore finishes; use the command-line form in `docs/install-macos.md` if Codex must stay closed.
 
 The engine stores user themes under `~/Library/Application Support/CodexDreamSkinStudio` and does not modify `app.asar`.
+
+Source archives and release archives use the checked-in `INSTALL-FILES.txt`
+allowlist. The installer copies only listed regular files and rejects stale or
+unsafe entries, so files added beside an extracted download are not installed.
 
 The installer also registers a per-user background monitor. By default it may
 repair only the theme watcher of a Codex process that already has the verified
@@ -39,4 +43,4 @@ monitor, state, logs, and native-mode marker together.
 
 ## Releases and updates
 
-This source tree intentionally has no third-party release URL. Before publishing binaries, set `githubRepository` in `repository.json` to your own `owner/repository`. Update checks remain disabled until that value is configured.
+Update checks use `Mars535821089-ops/Codex-Dynamic-Skin-System`, configured through `githubRepository` in `repository.json`.

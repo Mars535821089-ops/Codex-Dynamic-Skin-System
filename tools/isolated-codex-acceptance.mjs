@@ -662,20 +662,49 @@ export class CdpSession {
 
   async open(timeoutMs = 4000) {
     if (this.socket.readyState === WebSocket.OPEN) return;
-    await Promise.race([
-      new Promise((resolve, reject) => {
-        this.socket.addEventListener("open", resolve, { once: true });
-        this.socket.addEventListener("error", () => reject(new Error("CDP WebSocket failed")), { once: true });
-      }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("CDP WebSocket timeout")), timeoutMs)),
-    ]);
+    let timeout;
+    try {
+      await Promise.race([
+        new Promise((resolve, reject) => {
+          this.socket.addEventListener("open", resolve, { once: true });
+          this.socket.addEventListener("error", () => reject(new Error("CDP WebSocket failed")), { once: true });
+        }),
+        new Promise((_, reject) => {
+          timeout = setTimeout(() => reject(new Error("CDP WebSocket timeout")), timeoutMs);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
-  call(method, params = {}) {
+  call(method, params = {}, timeoutMs = null) {
+    if (timeoutMs !== null && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
+      throw new TypeError("CDP call timeout must be a positive number or null");
+    }
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.socket.send(JSON.stringify({ id, method, params }));
+      let timeout = null;
+      const settle = (callback, value) => {
+        if (timeout !== null) clearTimeout(timeout);
+        callback(value);
+      };
+      this.pending.set(id, {
+        resolve: (value) => settle(resolve, value),
+        reject: (error) => settle(reject, error),
+      });
+      if (timeoutMs !== null) {
+        timeout = setTimeout(() => {
+          if (!this.pending.delete(id)) return;
+          reject(new Error(`CDP call timed out: ${method}`));
+        }, timeoutMs);
+      }
+      try {
+        this.socket.send(JSON.stringify({ id, method, params }));
+      } catch (error) {
+        this.pending.delete(id);
+        settle(reject, error);
+      }
     });
   }
 

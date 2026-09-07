@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
@@ -31,6 +31,35 @@ function slash(value) {
   return value.split(path.sep).join("/");
 }
 
+function inspectPortablePath(relative) {
+  const portable = slash(relative);
+  if (portable !== portable.normalize("NFC")) {
+    throw new Error(`non-NFC path in public release: ${relative}`);
+  }
+  for (const segment of portable.split("/")) {
+    if (/[<>:"\\|?*\u0000-\u001f]/u.test(segment) || /[ .]$/u.test(segment)) {
+      throw new Error(`Windows-invalid path in public release: ${relative}`);
+    }
+    if (/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(segment)) {
+      throw new Error(`Windows-reserved path in public release: ${relative}`);
+    }
+  }
+  return portable;
+}
+
+function inspectPortablePathSet(paths) {
+  const seen = new Map();
+  for (const relative of paths) {
+    const portable = inspectPortablePath(relative);
+    const key = portable.toLowerCase();
+    const previous = seen.get(key);
+    if (previous && previous !== portable) {
+      throw new Error(`case-insensitive path collision: ${previous} and ${portable}`);
+    }
+    seen.set(key, portable);
+  }
+}
+
 function forbiddenVariants() {
   const bytes = Buffer.from(retiredProductName, "utf8");
   return [
@@ -47,6 +76,7 @@ function forbiddenVariants() {
 const blockedVariants = forbiddenVariants();
 
 function inspectPath(relative) {
+  inspectPortablePath(relative);
   const normalized = `${slash(relative).toLowerCase().replace(/^\.\//u, "")}/`;
   if (blockedVariants.some((variant) => normalized.includes(variant))) {
     throw new Error(`forbidden path in public release: ${relative}`);
@@ -90,6 +120,7 @@ async function git(root, arguments_, options = {}) {
 async function inspectTrackedTree(root) {
   const { stdout } = await git(root, ["ls-files", "-z"], { encoding: "buffer" });
   const tracked = Buffer.from(stdout).toString("utf8").split("\0").filter(Boolean);
+  inspectPortablePathSet(tracked);
   for (const relative of tracked) {
     inspectPath(relative);
     const absolute = path.join(root, relative);
@@ -99,6 +130,113 @@ async function inspectTrackedTree(root) {
     inspectBytes(await fs.readFile(absolute), relative);
   }
   return tracked.length;
+}
+
+async function inspectWorkingTreeCandidates(root) {
+  const { stdout } = await git(root, [
+    "ls-files", "--cached", "--others", "--exclude-standard", "-z",
+  ], { encoding: "buffer" });
+  const candidates = Buffer.from(stdout).toString("utf8").split("\0").filter(Boolean);
+  inspectPortablePathSet(candidates);
+  for (const relative of candidates) {
+    inspectPath(relative);
+    const absolute = path.join(root, relative);
+    const stat = await fs.lstat(absolute);
+    if (stat.isSymbolicLink()) throw new Error(`symbolic link in public release: ${relative}`);
+    if (!stat.isFile()) throw new Error(`working-tree entry is not a regular file: ${relative}`);
+    inspectBytes(await fs.readFile(absolute), relative);
+  }
+  return candidates.length;
+}
+
+async function inspectGitObjectStream(root, objects) {
+  const entries = [...objects];
+  if (entries.length === 0) return 0;
+
+  return new Promise((resolve, reject) => {
+    const child = spawn("git", ["cat-file", "--batch"], {
+      cwd: root,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let pending = Buffer.alloc(0);
+    let current = null;
+    let entryIndex = 0;
+    let inspected = 0;
+    let stderr = "";
+    let settled = false;
+
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      child.kill();
+      reject(error);
+    };
+
+    const consume = () => {
+      while (entryIndex < entries.length) {
+        if (!current) {
+          const newline = pending.indexOf(0x0a);
+          if (newline === -1) return;
+          const header = pending.subarray(0, newline).toString("utf8");
+          pending = pending.subarray(newline + 1);
+          const match = /^([0-9a-f]{40,64}) ([a-z]+) ([0-9]+)$/u.exec(header);
+          invariant(match, `unable to parse Git batch header: ${header}`);
+          const [expectedObject] = entries[entryIndex];
+          invariant(match[1] === expectedObject, "Git batch object order changed unexpectedly");
+          const size = Number(match[3]);
+          invariant(Number.isSafeInteger(size) && size >= 0, "invalid Git object size");
+          current = { object: match[1], type: match[2], size };
+        }
+
+        if (pending.length < current.size + 1) return;
+        invariant(pending[current.size] === 0x0a, "Git batch object delimiter is missing");
+        const bytes = Buffer.from(pending.subarray(0, current.size));
+        pending = pending.subarray(current.size + 1);
+        const [, labels] = entries[entryIndex];
+        if (current.type === "blob" && labels.size > 0) {
+          for (const label of labels) {
+            inspectBytes(bytes, `Git object ${current.object} ${label}`);
+          }
+          inspected += 1;
+        } else if (current.type === "commit" || current.type === "tag") {
+          inspectBytes(bytes, `Git object ${current.object}`);
+          inspected += 1;
+        }
+        entryIndex += 1;
+        current = null;
+      }
+    };
+
+    child.stdout.on("data", (chunk) => {
+      if (settled) return;
+      try {
+        pending = pending.length === 0 ? Buffer.from(chunk) : Buffer.concat([pending, chunk]);
+        consume();
+      } catch (error) {
+        fail(error);
+      }
+    });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", fail);
+    child.stdin.on("error", fail);
+    child.on("close", (code) => {
+      if (settled) return;
+      try {
+        consume();
+        invariant(code === 0, `git cat-file --batch failed: ${stderr.trim() || `exit ${code}`}`);
+        invariant(entryIndex === entries.length, "Git batch output ended before every object was read");
+        invariant(current === null && pending.length === 0, "Git batch output contained trailing data");
+        settled = true;
+        resolve(inspected);
+      } catch (error) {
+        fail(error);
+      }
+    });
+    child.stdin.end(`${entries.map(([object]) => object).join("\n")}\n`);
+  });
 }
 
 async function inspectReachableHistory(root) {
@@ -116,21 +254,7 @@ async function inspectReachableHistory(root) {
     objects.set(match[1], labels);
   }
 
-  let inspected = 0;
-  for (const [object, labels] of objects) {
-    const { stdout: rawType } = await git(root, ["cat-file", "-t", object]);
-    const type = rawType.trim();
-    if (type !== "blob" && type !== "commit" && type !== "tag") continue;
-    const { stdout: content } = await git(root, ["cat-file", "-p", object], { encoding: "buffer" });
-    const bytes = Buffer.from(content);
-    if (type === "blob" && labels.size > 0) {
-      for (const label of labels) inspectBytes(bytes, `Git object ${object} ${label}`);
-    } else {
-      inspectBytes(bytes, `Git object ${object}`);
-    }
-    inspected += 1;
-  }
-  return inspected;
+  return inspectGitObjectStream(root, objects);
 }
 
 export async function scanPublicBoundary({ root }) {
@@ -140,8 +264,9 @@ export async function scanPublicBoundary({ root }) {
   const gitRoot = await fs.realpath(path.resolve(stdout.trim()));
   invariant(gitRoot === absoluteRoot, "public release root must be the Git repository root");
   const files = await inspectTrackedTree(absoluteRoot);
+  const workingFiles = await inspectWorkingTreeCandidates(absoluteRoot);
   const gitObjects = await inspectReachableHistory(absoluteRoot);
-  return Object.freeze({ ok: true, files, git: true, gitObjects });
+  return Object.freeze({ ok: true, files, workingFiles, git: true, gitObjects });
 }
 
 function parseArguments(argv) {

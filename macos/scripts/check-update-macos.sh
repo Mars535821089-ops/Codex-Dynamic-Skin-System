@@ -33,9 +33,25 @@ normalize_version() {
   local value="$1"
   value="${value#v}"
   value="${value#V}"
-  printf '%s' "$value" | /usr/bin/grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
+  printf '%s' "$value" | /usr/bin/grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
     || return 1
   printf '%s\n' "$value"
+}
+
+compare_version_component() {
+  local left="$1"
+  local right="$2"
+  if [ "${#left}" -gt "${#right}" ]; then
+    printf '1\n'
+  elif [ "${#left}" -lt "${#right}" ]; then
+    printf '%s\n' '-1'
+  elif [ "$left" = "$right" ]; then
+    printf '0\n'
+  elif (export LC_ALL=C; [[ "$left" > "$right" ]]); then
+    printf '1\n'
+  else
+    printf '%s\n' '-1'
+  fi
 }
 
 version_is_newer() {
@@ -45,13 +61,13 @@ version_is_newer() {
   local current_major current_minor current_patch
   IFS=. read -r latest_major latest_minor latest_patch <<< "$latest"
   IFS=. read -r current_major current_minor current_patch <<< "$current"
-  if [ "$latest_major" -ne "$current_major" ]; then
-    [ "$latest_major" -gt "$current_major" ]
-  elif [ "$latest_minor" -ne "$current_minor" ]; then
-    [ "$latest_minor" -gt "$current_minor" ]
-  else
-    [ "$latest_patch" -gt "$current_patch" ]
-  fi
+  local comparison
+  comparison="$(compare_version_component "$latest_major" "$current_major")"
+  [ "$comparison" = '0' ] || { [ "$comparison" = '1' ]; return; }
+  comparison="$(compare_version_component "$latest_minor" "$current_minor")"
+  [ "$comparison" = '0' ] || { [ "$comparison" = '1' ]; return; }
+  comparison="$(compare_version_component "$latest_patch" "$current_patch")"
+  [ "$comparison" = '1' ]
 }
 
 [ -f "$VERSION_PATH" ] || fail "Installed VERSION file is missing: $VERSION_PATH"

@@ -6,8 +6,11 @@ import vm from "node:vm";
 import { fileURLToPath } from "node:url";
 import {
   appendDynamicModuleRevision,
+  cancelPendingEarlyGeneration,
   cleanupExcludedSurface,
+  earlyGenerationWaitOptions,
   earlyPayloadFor,
+  isLoadedThemeOwnershipHealthy,
   isExcludedCdpSurfaceUrl,
   rendererActionRefreshPlan,
   waitForEarlyGenerationApplied,
@@ -161,6 +164,12 @@ assert.deepEqual(guarded.context.window.installs, [], "A shell without its sideb
 guarded.markers.sidebar = true;
 guarded.tick();
 assert.deepEqual(guarded.context.window.installs, ["guarded"]);
+guarded.fireDomReady();
+assert.deepEqual(
+  guarded.context.window.installs,
+  ["guarded"],
+  "DOMContentLoaded must not execute a generation that already succeeded through polling.",
+);
 
 const generic = createFixture();
 vm.runInNewContext(earlyPayloadFor('window.installs.push("generic")', "generic"), generic.context);
@@ -219,6 +228,53 @@ assert.equal(await waitForEarlyGenerationApplied({
 }, "reload-generation", { timeoutMs: 100, pollMs: 1 }), true,
 "Reload recovery must wait for the deferred early shell before staging active video blobs.");
 assert.equal(earlyAppliedPolls, 3);
+
+assert.deepEqual(
+  earlyGenerationWaitOptions("Page.loadEventFired"),
+  { timeoutMs: 1250, pollMs: 50 },
+  "A renderer reload must fall back quickly instead of looking un-injected for ten seconds.",
+);
+let cancelledEarlyExpression = null;
+assert.equal(await cancelPendingEarlyGeneration({
+  async evaluate(expression) {
+    cancelledEarlyExpression = expression;
+    return vm.runInNewContext(expression, {
+      window: { __CODEX_DREAM_SKIN_EARLY_GENERATION__: "stale-bootstrap-generation" },
+    });
+  },
+}, "reload-generation"), true,
+"A timed-out stale deferred shell must be cancelled before the current renderer payload is restored.");
+assert.match(cancelledEarlyExpression, /__CODEX_DREAM_SKIN_EARLY_GENERATION__/);
+
+const hiddenHealthyOwnership = {
+  installed: true,
+  version: "1.5.17",
+  stylePresent: true,
+  businessClassPollution: 0,
+  themeId: "com.example.theme",
+  revision: "revision-1",
+  documentVisibility: "hidden",
+  dynamic: { activation: "active", diagnostics: { phase: "active" } },
+  dynamicRootCount: 1,
+  dynamicVisibleRootCount: 0,
+  documentOverflow: { x: false },
+};
+const ownershipPayload = {
+  displayMode: "theme",
+  sourceApiVersion: 2,
+  theme: { id: "com.example.theme" },
+  revision: "revision-1",
+};
+assert.equal(isLoadedThemeOwnershipHealthy(hiddenHealthyOwnership, ownershipPayload), true,
+  "A background renderer with the exact active theme must remain healthy while presentation is concealed.");
+assert.equal(isLoadedThemeOwnershipHealthy(
+  { ...hiddenHealthyOwnership, documentVisibility: "visible" },
+  ownershipPayload,
+), false, "A foreground renderer with a concealed media root must still trigger recovery failure.");
+assert.equal(isLoadedThemeOwnershipHealthy(
+  { ...hiddenHealthyOwnership, dynamicRootCount: 0, dynamicVisibleRootCount: 0 },
+  ownershipPayload,
+), false, "A missing media root must still trigger recovery failure.");
 
 const earlySource = earlyPayloadFor("", "source-contract");
 assert.doesNotMatch(earlySource, /MutationObserver|childList|subtree/,
@@ -405,7 +461,7 @@ assert.match(
 );
 assert.match(
   source,
-  /const recoverRendererRecord = async[\s\S]*record\.ready = false;[\s\S]*waitForEarlyGenerationApplied\(record\.session, loaded\.revision[\s\S]*applyLoadedToSession\(record\.session, loaded\)[\s\S]*waitForLoadedSession[\s\S]*record\.ready = true;[\s\S]*session\.on\("Page\.loadEventFired",[\s\S]*record\.ready && Boolean\(current\.dynamicRenderer\)[\s\S]*record\.recoveryQueue\.request\("Page\.loadEventFired"\)/,
+  /const recoverRendererRecord = async[\s\S]*record\.ready = false;[\s\S]*waitForEarlyGenerationApplied\([\s\S]*?record\.session,[\s\S]*?loaded\.revision[\s\S]*cancelPendingEarlyGeneration\(record\.session, loaded\.revision\)[\s\S]*applyLoadedToSession\(record\.session, loaded\)[\s\S]*waitForLoadedOwnershipSession[\s\S]*record\.ready = true;[\s\S]*session\.on\("Page\.loadEventFired",[\s\S]*record\.ready && Boolean\(current\.dynamicRenderer\)[\s\S]*record\.recoveryQueue\.request\("Page\.loadEventFired"\)/,
   "A verified renderer must restage theme blobs or restore native controls, then reverify after a page reload.",
 );
 assert.match(

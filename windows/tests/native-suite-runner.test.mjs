@@ -12,6 +12,7 @@ const runner = join(testsDirectory, "native-suite-runner.mjs");
 const expectedSuites = [
   "config-startup-rollback.tests.ps1",
   "dynamic-v2-import.Tests.ps1",
+  "profile-scoped-stop.tests.ps1",
   "start-cdp-failure-appearance-recovery.tests.ps1",
   "start-post-launch-appearance-recovery.tests.ps1",
   "start-renderer-readiness.tests.ps1",
@@ -22,6 +23,7 @@ const expectedSuites = [
 const caseVariantSuites = [
   "CONFIG-STARTUP-ROLLBACK.TESTS.PS1",
   "DYNAMIC-V2-IMPORT.tests.ps1",
+  "PROFILE-SCOPED-STOP.Tests.ps1",
   "START-CDP-FAILURE-APPEARANCE-RECOVERY.Tests.ps1",
   "START-POST-LAUNCH-APPEARANCE-RECOVERY.Tests.ps1",
   "START-RENDERER-READINESS.Tests.ps1",
@@ -103,7 +105,7 @@ test("native runner executes every PowerShell suite case-insensitively with the 
       assert.ok(args.includes("-NoProfile"));
       assert.ok(args.includes("-NonInteractive"));
     }
-    assert.match(result.stdout, /PASS: 8 Windows PowerShell native test suites/);
+    assert.match(result.stdout, /PASS: 9 Windows PowerShell native test suites/);
   } finally {
     rmSync(fixture.directory, { recursive: true, force: true });
   }

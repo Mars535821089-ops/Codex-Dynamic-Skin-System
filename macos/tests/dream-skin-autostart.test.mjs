@@ -23,26 +23,29 @@ function snapshot(overrides = {}) {
   };
 }
 
-test("an exact normal-profile Codex launch is classified without accepting partial flags", () => {
+test("loopback CDP is sufficient and background anti-throttling remains optional", () => {
   const executable = "/Applications/Codex.app/Contents/MacOS/Codex";
-  const flags = [
+  const cdpFlags = [
     "--remote-debugging-address=127.0.0.1",
     "--remote-debugging-port=9341",
+  ].join(" ");
+  const playbackFlags = [
     "--disable-background-media-suspend",
     "--disable-backgrounding-occluded-windows",
     "--disable-background-timer-throttling",
     "--disable-renderer-backgrounding",
   ].join(" ");
   const result = classifyCodexProcesses([
-    ` 42 ${executable} ${flags}`,
+    ` 42 ${executable} ${cdpFlags}`,
+    ` 47 ${executable} ${cdpFlags} ${playbackFlags}`,
     ` 43 ${executable} --remote-debugging-port=9341`,
-    ` 44 ${executable} ${flags} --user-data-dir=/tmp/isolated`,
-    ` 45 ${executable}.helper ${flags}`,
-    ` 46 ${executable} ${flags.replace("--remote-debugging-address=127.0.0.1", "--remote-debugging-address=127.0.0.10")}`,
+    ` 44 ${executable} ${cdpFlags} --user-data-dir=/tmp/isolated`,
+    ` 45 ${executable}.helper ${cdpFlags}`,
+    ` 46 ${executable} ${cdpFlags.replace("--remote-debugging-address=127.0.0.1", "--remote-debugging-address=127.0.0.10")}`,
   ].join("\n"), executable);
   assert.deepEqual(result, {
-    pids: [42, 43, 46],
-    compliantPids: [42],
+    pids: [42, 47, 43, 46],
+    compliantPids: [42, 47],
     plainPids: [43, 46],
   });
 });
@@ -156,6 +159,25 @@ test("recent corrections are cooled down, but failed repairs retry afterwards", 
       cooldown,
     ),
     { action: "wait", reason: "cooldown" },
+  );
+});
+
+test("a confirmed stop clears the previous correction cooldown for the next launch", () => {
+  const justStopped = {
+    lastAttemptPid: 42,
+    lastAttemptAt: now - 1000,
+    lastResult: "ok",
+    observedStopped: true,
+  };
+  assert.deepEqual(
+    decideAutostartAction(
+      snapshot({ pids: [84], compliantPids: [], plainPids: [84], watcherState: "unhealthy" }),
+      justStopped,
+      now,
+      cooldown,
+      { allowCodexRestart: true },
+    ),
+    { action: "restart", pid: 84 },
   );
 });
 

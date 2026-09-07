@@ -376,15 +376,36 @@ require_macos_runtime() {
   verify_macos_app_signature "$verification_mode"
 }
 
-codex_main_pids() {
+codex_profile_pids_from_listing() {
+  local profile="${1:-default}"
   local pid
   local command_line
+  local isolated
+  case "$profile" in default|isolated) ;; *) return 2 ;; esac
   while read -r pid command_line; do
     [ -n "$pid" ] || continue
     case "$command_line" in
-      "$CODEX_EXE"*) pid_is_codex_executable "$pid" && printf '%s\n' "$pid" ;;
+      "$CODEX_EXE"*) ;;
+      *) continue ;;
     esac
-  done < <(/bin/ps -axo pid=,command=)
+    isolated="false"
+    case " $command_line " in
+      *" --user-data-dir="*|*" --user-data-dir "*) isolated="true" ;;
+    esac
+    if { [ "$profile" = "default" ] && [ "$isolated" = "true" ]; } \
+      || { [ "$profile" = "isolated" ] && [ "$isolated" != "true" ]; }; then
+      continue
+    fi
+    pid_is_codex_executable "$pid" && printf '%s\n' "$pid"
+  done
+}
+
+codex_main_pids() {
+  /bin/ps -axo pid=,command= | codex_profile_pids_from_listing default
+}
+
+codex_isolated_main_pids() {
+  /bin/ps -axo pid=,command= | codex_profile_pids_from_listing isolated
 }
 
 codex_is_running() {
@@ -411,6 +432,19 @@ codex_background_playback_capable() {
     codex_process_has_background_playback_flags "$pid" && return 0
   done < <(codex_main_pids)
   return 1
+}
+
+dynamic_background_playback_enabled() {
+  [ -n "${NODE:-}" ] && [ -x "$NODE" ] || return 1
+  "$NODE" -e '
+const fs = require("node:fs");
+try {
+  const settings = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  process.exit(settings?.backgroundPlayback === true ? 0 : 1);
+} catch {
+  process.exit(1);
+}
+' "$STATE_ROOT/dynamic-settings.json"
 }
 
 active_theme_appearance() {
@@ -470,31 +504,91 @@ recorded_injector_process_matches() {
   return 0
 }
 
+signal_recorded_injector_process() {
+  local signal="$1"
+  local pid="$2"
+  local expected_start="${3:-}"
+  local expected_node="${4:-}"
+  local expected_injector="${5:-}"
+  local expected_port="${6:-}"
+  case "$signal" in TERM|KILL) ;; *) return 2 ;; esac
+  recorded_injector_process_matches "$pid" "$expected_start" "$expected_node" \
+    "$expected_injector" "$expected_port" || return 0
+  /bin/kill "-$signal" "$pid" 2>/dev/null || true
+}
+
+codex_process_identities() {
+  local pid
+  local started_at
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    started_at="$(process_started_at "$pid")"
+    [ -n "$started_at" ] || continue
+    pid_is_codex_executable "$pid" || continue
+    /usr/bin/printf '%s\\t%s\\n' "$pid" "$started_at"
+  done < <(codex_main_pids)
+}
+
+codex_process_identity_matches() {
+  local pid="$1"
+  local expected_start="$2"
+  local actual_start=""
+  [ -n "$expected_start" ] || return 1
+  pid_is_codex_executable "$pid" || return 1
+  actual_start="$(process_started_at "$pid")"
+  [ -n "$actual_start" ] && [ "$actual_start" = "$expected_start" ]
+}
+
+codex_identity_list_is_running() {
+  local identities="$1"
+  local pid
+  local expected_start
+  while IFS=$'\\t' read -r pid expected_start; do
+    [ -n "$pid" ] || continue
+    codex_process_identity_matches "$pid" "$expected_start" && return 0
+  done <<< "$identities"
+  return 1
+}
+
+signal_codex_identities() {
+  local signal="$1"
+  local identities="$2"
+  local pid
+  local expected_start
+  case "$signal" in TERM|KILL) ;; *) return 2 ;; esac
+  while IFS=$'\\t' read -r pid expected_start; do
+    [ -n "$pid" ] || continue
+    codex_process_identity_matches "$pid" "$expected_start" || continue
+    /bin/kill "-$signal" "$pid" 2>/dev/null || true
+  done <<< "$identities"
+}
+
 stop_codex() {
   local allow_force="${1:-false}"
   local deadline
-  local pid
+  local target_identities
 
   release_codex_launchd_job
-  codex_is_running || return 0
-  /usr/bin/osascript -e 'tell application id "com.openai.codex" to quit' >/dev/null 2>&1 || true
+  target_identities="$(codex_process_identities)"
+  [ -n "$target_identities" ] || return 0
+  signal_codex_identities TERM "$target_identities"
   deadline=$((SECONDS + 15))
-  while codex_is_running && [ "$SECONDS" -lt "$deadline" ]; do /bin/sleep 0.25; done
-  codex_is_running || return 0
+  while codex_identity_list_is_running "$target_identities" && [ "$SECONDS" -lt "$deadline" ]; do
+    /bin/sleep 0.25
+  done
+  codex_identity_list_is_running "$target_identities" || return 0
 
   [ "$allow_force" = "true" ] || fail "ChatGPT did not close within 15 seconds; explicit restart authorization is required for a forced stop."
-  while IFS= read -r pid; do
-    [ -n "$pid" ] && /bin/kill -TERM "$pid" 2>/dev/null || true
-  done < <(codex_main_pids)
+  signal_codex_identities TERM "$target_identities"
   deadline=$((SECONDS + 5))
-  while codex_is_running && [ "$SECONDS" -lt "$deadline" ]; do /bin/sleep 0.25; done
-  if codex_is_running; then
-    while IFS= read -r pid; do
-      [ -n "$pid" ] && /bin/kill -KILL "$pid" 2>/dev/null || true
-    done < <(codex_main_pids)
+  while codex_identity_list_is_running "$target_identities" && [ "$SECONDS" -lt "$deadline" ]; do
+    /bin/sleep 0.25
+  done
+  if codex_identity_list_is_running "$target_identities"; then
+    signal_codex_identities KILL "$target_identities"
   fi
   /bin/sleep 0.5
-  codex_is_running && fail "ChatGPT could not be stopped safely."
+  codex_identity_list_is_running "$target_identities" && fail "ChatGPT could not be stopped safely."
   return 0
 }
 
@@ -943,28 +1037,28 @@ release_codex_launchd_job() {
 
 launch_codex_with_cdp() {
   local port="$1"
+  local launch_args=(
+    "--remote-debugging-address=127.0.0.1"
+    "--remote-debugging-port=$port"
+  )
+  if dynamic_background_playback_enabled; then
+    launch_args+=(
+      "--disable-background-media-suspend"
+      "--disable-backgrounding-occluded-windows"
+      "--disable-background-timer-throttling"
+      "--disable-renderer-backgrounding"
+    )
+  fi
   : > "$APP_LOG"
   : > "$APP_ERROR_LOG"
   release_codex_launchd_job
   # Start as a normal user process (NOT launchctl submit). submit keeps a job
   # that will restart Codex when the window is closed.
-  /usr/bin/open -na "$CODEX_BUNDLE" --args \
-    --remote-debugging-address=127.0.0.1 \
-    --remote-debugging-port="$port" \
-    --disable-background-media-suspend \
-    --disable-backgrounding-occluded-windows \
-    --disable-background-timer-throttling \
-    --disable-renderer-backgrounding \
+  /usr/bin/open -na "$CODEX_BUNDLE" --args "${launch_args[@]}" \
     >>"$APP_LOG" 2>>"$APP_ERROR_LOG" || true
   # Fallback if open failed to pass args on some builds
   if ! codex_is_running; then
-    /usr/bin/nohup "$CODEX_EXE" \
-      --remote-debugging-address=127.0.0.1 \
-      --remote-debugging-port="$port" \
-      --disable-background-media-suspend \
-      --disable-backgrounding-occluded-windows \
-      --disable-background-timer-throttling \
-      --disable-renderer-backgrounding \
+    /usr/bin/nohup "$CODEX_EXE" "${launch_args[@]}" \
       >>"$APP_LOG" 2>>"$APP_ERROR_LOG" &
   fi
 }

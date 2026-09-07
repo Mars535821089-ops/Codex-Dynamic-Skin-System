@@ -28,11 +28,32 @@ function ConvertTo-DreamSkinVersion {
   if ($normalized -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
     throw "Invalid release version: $Value"
   }
-  $parsed = $null
-  if (-not [version]::TryParse($normalized, [ref]$parsed)) {
-    throw "Invalid release version: $Value"
+  return $normalized
+}
+
+function Compare-DreamSkinVersionComponent {
+  param(
+    [Parameter(Mandatory = $true)][string]$Left,
+    [Parameter(Mandatory = $true)][string]$Right
+  )
+  if ($Left.Length -gt $Right.Length) { return 1 }
+  if ($Left.Length -lt $Right.Length) { return -1 }
+  return [string]::Compare($Left, $Right, [System.StringComparison]::Ordinal)
+}
+
+function Compare-DreamSkinVersion {
+  param(
+    [Parameter(Mandatory = $true)][string]$Left,
+    [Parameter(Mandatory = $true)][string]$Right
+  )
+  $leftParts = $Left.Split('.')
+  $rightParts = $Right.Split('.')
+  for ($index = 0; $index -lt 3; $index += 1) {
+    $comparison = Compare-DreamSkinVersionComponent `
+      -Left $leftParts[$index] -Right $rightParts[$index]
+    if ($comparison -ne 0) { return $comparison }
   }
-  return $parsed
+  return 0
 }
 
 function Show-DreamSkinUpdateResult {
@@ -75,20 +96,33 @@ try {
   $currentText = ([System.IO.File]::ReadAllText($versionPath)).Trim()
   $current = ConvertTo-DreamSkinVersion -Value $currentText
   $headers = @{ Accept = 'application/vnd.github+json'; 'User-Agent' = 'CodexDreamSkin' }
-  $previousProtocol = [Net.ServicePointManager]::SecurityProtocol
+  $responsePath = [System.IO.Path]::GetTempFileName()
   try {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repository/releases/latest" `
-      -Headers $headers -Method Get -TimeoutSec 12
+    $previousProtocol = [Net.ServicePointManager]::SecurityProtocol
+    try {
+      [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+      Invoke-WebRequest -UseBasicParsing `
+        -Uri "https://api.github.com/repos/$repository/releases/latest" `
+        -Headers $headers -Method Get -TimeoutSec 12 -OutFile $responsePath | Out-Null
+    } finally {
+      [Net.ServicePointManager]::SecurityProtocol = $previousProtocol
+    }
+    $responseInfo = Get-Item -LiteralPath $responsePath -ErrorAction Stop
+    if ($responseInfo.Length -le 0 -or $responseInfo.Length -gt 1048576) {
+      throw 'GitHub returned an invalid response size.'
+    }
+    $responseText = [System.IO.File]::ReadAllText($responsePath)
+    $release = $responseText | ConvertFrom-Json
   } finally {
-    [Net.ServicePointManager]::SecurityProtocol = $previousProtocol
+    Remove-Item -LiteralPath $responsePath -Force -ErrorAction SilentlyContinue
   }
   if (-not $release.tag_name) { throw 'GitHub did not return a release tag.' }
   $latest = ConvertTo-DreamSkinVersion -Value "$($release.tag_name)"
+  $latestComparison = Compare-DreamSkinVersion -Left $latest -Right $current
   $result = [pscustomobject]@{
-    currentVersion = "v$currentText"
-    latestVersion = "v$($latest.ToString())"
-    updateAvailable = $latest -gt $current
+    currentVersion = "v$current"
+    latestVersion = "v$latest"
+    updateAvailable = $latestComparison -gt 0
     releaseUrl = $releasePage
   }
   if ($Json) { $result | ConvertTo-Json -Compress }

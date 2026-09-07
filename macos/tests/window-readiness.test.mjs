@@ -21,6 +21,76 @@ const [startSource, commonSource] = await Promise.all([
 ]);
 const injectorSource = await fs.readFile(path.join(macosRoot, "scripts", "injector.mjs"), "utf8");
 
+const profilePidProbe = spawnSync("/bin/bash", ["-c", String.raw`
+. "$1"
+CODEX_EXE="/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"
+pid_is_codex_executable() { return 0; }
+listing=' 41 /Applications/ChatGPT.app/Contents/MacOS/ChatGPT --remote-debugging-port=9341
+ 42 /Applications/ChatGPT.app/Contents/MacOS/ChatGPT --user-data-dir=/tmp/isolated-a --remote-debugging-port=64153
+ 43 /Applications/ChatGPT.app/Contents/MacOS/ChatGPT --user-data-dir "/tmp/isolated b" --remote-debugging-port=64154'
+printf '%s\n' "$listing" | codex_profile_pids_from_listing default
+printf '%s\n' isolated
+printf '%s\n' "$listing" | codex_profile_pids_from_listing isolated
+`, "profile-pid-probe", commonPath], { encoding: "utf8" });
+assert.equal(profilePidProbe.status, 0, profilePidProbe.stderr);
+assert.equal(profilePidProbe.stdout, "41\nisolated\n42\n43\n",
+  "Default-profile process control must exclude every explicit user-data-dir instance.");
+
+const recycledPidProbe = spawnSync("/bin/bash", ["-c", String.raw`
+set -euo pipefail
+. "$1"
+/bin/sleep 60 &
+target_pid="$!"
+cleanup() {
+  /bin/kill -TERM "$target_pid" 2>/dev/null || true
+  wait "$target_pid" 2>/dev/null || true
+}
+trap cleanup EXIT
+release_codex_launchd_job() { return 0; }
+codex_main_pids() { /usr/bin/printf '%s\\n' "$target_pid"; }
+codex_process_identities() { /usr/bin/printf '%s\\t%s\\n' "$target_pid" 'old-start'; }
+process_started_at() { /usr/bin/printf '%s\\n' 'reused-start'; }
+pid_is_codex_executable() { /bin/kill -0 "$1" 2>/dev/null; }
+stop_codex true
+/bin/kill -0 "$target_pid"
+`, "recycled-pid-probe", commonPath], { encoding: "utf8", timeout: 5_000 });
+assert.equal(recycledPidProbe.status, 0, recycledPidProbe.stderr,
+  "Stop must not signal a PID whose Codex start identity changed after capture.");
+
+const recycledInjectorPidProbe = spawnSync("/bin/bash", ["-c", String.raw`
+set -euo pipefail
+. "$1"
+/bin/sleep 60 &
+target_pid="$!"
+cleanup() {
+  /bin/kill -TERM "$target_pid" 2>/dev/null || true
+  wait "$target_pid" 2>/dev/null || true
+}
+trap cleanup EXIT
+recorded_injector_process_matches() { return 1; }
+signal_recorded_injector_process TERM "$target_pid" 'old-start' '/fake/node' '/fake/injector.mjs' 9341
+/bin/kill -0 "$target_pid"
+`, "recycled-injector-pid-probe", commonPath], { encoding: "utf8", timeout: 5_000 });
+assert.equal(recycledInjectorPidProbe.status, 0, recycledInjectorPidProbe.stderr,
+  "Injector cleanup must not signal a PID whose recorded launch identity no longer matches.");
+
+const stopFunction = commonSource.slice(
+  commonSource.indexOf("stop_codex() {"),
+  commonSource.indexOf("listener_pids() {"),
+);
+assert.match(stopFunction, /target_identities="\$\(codex_process_identities\)"/,
+  "Stop must pin default-profile process identities before signalling anything.");
+assert.doesNotMatch(stopFunction, /tell application id .* to quit/,
+  "Stop must never send a bundle-wide quit request that can close isolated instances.");
+assert.doesNotMatch(stopFunction, /codex_main_pids/,
+  "Stop must never re-enumerate and signal a different process set mid-operation.");
+assert.match(startSource,
+  /INJECTOR_STARTED_AT="\$\(process_started_at "\$INJECTOR_PID"\)"[\s\S]*?wait_for_cdp/,
+  "Startup must capture the watcher identity before entering the long CDP wait.");
+assert.match(startSource,
+  /remove_injector_launchd_job[\s\S]*?signal_recorded_injector_process TERM "\$INJECTOR_PID"[\s\\]*"\$INJECTOR_STARTED_AT"/,
+  "Startup failure must unload the owned job and signal only the originally launched watcher identity.");
+
 const exactPayload = {
   skinVersion: "test-version",
   expectedThemeId: "theme-exact",
@@ -155,6 +225,18 @@ assert.equal(
   false,
   "A hidden renderer must not verify even when CDP still reports window bounds.",
 );
+const hiddenOperationalResult = assessRendererVerification(
+  hiddenRenderer,
+  readyNativeWindow,
+  { ...exactPayload, allowHiddenDocument: true },
+);
+assert.equal(
+  hiddenOperationalResult.pass,
+  true,
+  "The background watcher may verify a healthy hidden renderer without forcing it visible.",
+);
+assert.equal(hiddenOperationalResult.checks.documentVisible, false);
+assert.equal(hiddenOperationalResult.checks.hiddenDocumentAllowed, true);
 
 // Codex 26.721.x (Chrome/150) returns -32000 "Browser window not found" for
 // the app's real, focused, on-screen window (confirmed live via CDP: the
@@ -281,7 +363,7 @@ assert.equal(
 
 assert.match(
   commonSource,
-  /\/usr\/bin\/open -na "\$CODEX_BUNDLE" --args[\s\\]*\n[\s\\]*--remote-debugging-address=127\.0\.0\.1/,
+  /local launch_args=\([\s\S]*?"--remote-debugging-address=127\.0\.0\.1"[\s\S]*?"--remote-debugging-port=\$port"[\s\S]*?\/usr\/bin\/open -na "\$CODEX_BUNDLE" --args "\$\{launch_args\[@\]\}"/,
   "The first launch must retain a new CDP-enabled app instance.",
 );
 for (const flag of [
@@ -291,12 +373,13 @@ for (const flag of [
   "--disable-renderer-backgrounding",
 ]) {
   const occurrences = commonSource.split(flag).length - 1;
-  assert.equal(
-    occurrences,
-    3,
-    `${flag} must be checked on the live process and passed through both CDP launch paths.`,
-  );
+  assert.ok(occurrences >= 2, `${flag} must be capability-checked and conditionally launched.`);
 }
+assert.match(
+  commonSource,
+  /dynamic_background_playback_enabled[\s\S]*?backgroundPlayback[\s\S]*?if dynamic_background_playback_enabled; then[\s\S]*?--disable-background-media-suspend/,
+  "Background anti-throttling must only be launched after the persisted opt-in is read.",
+);
 assert.match(
   startSource,
   /activate_codex_window\(\)\s*\{\s*\/usr\/bin\/open -a "\$CODEX_BUNDLE"[^\n]*\n\}/,
@@ -393,6 +476,9 @@ launch_injector_daemon() {
 }
 wait_for_cdp() { return 0; }
 process_started_at() { /usr/bin/printf 'test-start-time\\n'; }
+recorded_injector_process_matches() { return 0; }
+remove_injector_launchd_job() { return 0; }
+signal_recorded_injector_process() { return 0; }
 codex_main_pids() { /usr/bin/printf '4242\\n'; }
 write_state() { /usr/bin/printf '{}\\n' > "$STATE_PATH"; }
 mark_state_stale() { /usr/bin/printf 'stale\\n' > "$STALE_MARKER"; }

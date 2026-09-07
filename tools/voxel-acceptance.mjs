@@ -74,27 +74,77 @@ async function assertIsolatedCdp(port) {
   return { pid: explicitOwners[0].pid };
 }
 
-class Cdp {
+export class Cdp {
   constructor(url) {
-    this.socket = new WebSocket(url); this.id = 0; this.pending = new Map();
+    this.socket = new WebSocket(url); this.id = 0; this.pending = new Map(); this.closed = false;
     this.socket.addEventListener("message", (event) => {
       const message = JSON.parse(String(event.data));
       if (!message.id || !this.pending.has(message.id)) return;
       const pending = this.pending.get(message.id); this.pending.delete(message.id);
       if (message.error) pending.reject(new Error(message.error.message)); else pending.resolve(message.result);
     });
+    this.socket.addEventListener("close", () => {
+      this.closed = true;
+      this.rejectPending(new Error("CDP socket closed"));
+    });
+    this.socket.addEventListener("error", () => {
+      this.rejectPending(new Error("CDP socket failed"));
+    });
   }
-  async open() {
-    await Promise.race([
-      new Promise((resolve, reject) => { this.socket.addEventListener("open", resolve, { once: true }); this.socket.addEventListener("error", reject, { once: true }); }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("CDP WebSocket timeout")), 5000)),
-    ]);
+  async open(timeoutMs = 5000) {
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error(`Invalid CDP open timeout: ${timeoutMs}`);
+    await new Promise((resolve, reject) => {
+      let timeout;
+      const finish = (callback, value) => {
+        clearTimeout(timeout);
+        this.socket.removeEventListener("open", onOpen);
+        this.socket.removeEventListener("error", onError);
+        callback(value);
+      };
+      const onOpen = () => finish(resolve);
+      const onError = () => finish(reject, new Error("CDP WebSocket failed"));
+      this.socket.addEventListener("open", onOpen, { once: true });
+      this.socket.addEventListener("error", onError, { once: true });
+      timeout = setTimeout(() => {
+        try { this.socket.close(); } catch {}
+        finish(reject, new Error("CDP WebSocket timeout"));
+      }, timeoutMs);
+    });
   }
-  call(method, params = {}) {
+  call(method, params = {}, timeoutMs = 30000) {
+    if (this.closed) return Promise.reject(new Error("CDP session is closed"));
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      return Promise.reject(new Error(`Invalid CDP command timeout: ${timeoutMs}`));
+    }
     const id = ++this.id;
-    return new Promise((resolve, reject) => { this.pending.set(id, { resolve, reject }); this.socket.send(JSON.stringify({ id, method, params })); });
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`CDP command timed out: ${method}`));
+      }, timeoutMs);
+      const settle = (callback) => (value) => {
+        clearTimeout(timeout);
+        callback(value);
+      };
+      this.pending.set(id, { resolve: settle(resolve), reject: settle(reject) });
+      try {
+        this.socket.send(JSON.stringify({ id, method, params }));
+      } catch (error) {
+        this.pending.delete(id);
+        clearTimeout(timeout);
+        reject(error);
+      }
+    });
   }
-  close() { this.socket.close(); }
+  rejectPending(error) {
+    for (const pending of this.pending.values()) pending.reject(error);
+    this.pending.clear();
+  }
+  close() {
+    this.closed = true;
+    this.rejectPending(new Error("CDP session closed"));
+    try { this.socket.close(); } catch {}
+  }
 }
 
 async function localServer() {
@@ -113,8 +163,26 @@ async function localServer() {
   return { server, port: server.address().port };
 }
 
-async function fetchJson(url, options) {
-  const response = await fetch(url, options);
+async function fetchWithTimeout(url, options, timeoutMs) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error(`Invalid CDP HTTP timeout: ${timeoutMs}`);
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  try {
+    return await fetch(url, { ...(options || {}), signal: controller.signal });
+  } catch (error) {
+    if (timedOut) throw new Error(`CDP HTTP request timed out: ${url}`, { cause: error });
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export async function fetchJson(url, options, timeoutMs = 5000) {
+  const response = await fetchWithTimeout(url, options, timeoutMs);
   if (!response.ok) throw new Error(`HTTP ${response.status} from ${url}`);
   return response.json();
 }
@@ -173,7 +241,10 @@ async function run(options) {
     await writeJson(options.reportPath, report); return report;
   } finally {
     cdp?.close();
-    if (target?.id) await fetch(`http://127.0.0.1:${options.cdpPort}/json/close/${target.id}`).catch(() => {});
+    if (target?.id) {
+      await fetchWithTimeout(`http://127.0.0.1:${options.cdpPort}/json/close/${target.id}`, undefined, 2000)
+        .catch(() => {});
+    }
     await new Promise((resolve) => local.server.close(resolve));
   }
 }

@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 const expectedSuites = [
   "config-startup-rollback.tests.ps1",
   "dynamic-v2-import.Tests.ps1",
+  "profile-scoped-stop.tests.ps1",
   "start-cdp-failure-appearance-recovery.tests.ps1",
   "start-post-launch-appearance-recovery.tests.ps1",
   "start-renderer-readiness.tests.ps1",

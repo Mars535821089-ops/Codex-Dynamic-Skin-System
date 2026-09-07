@@ -9,12 +9,12 @@
     {
       "name": "media-layer.js",
       "path": "dynamic/browser/media-layer.js",
-      "sha256": "5d2a02506f06fa06971afc75bd69ad51614a5b2e0e03ee499234314a379906d9"
+      "sha256": "5c387abf2a3b3f67dd2a560ca03220da5ec543d68528e06917f860fe6dab4226"
     },
     {
       "name": "audio-bus.js",
       "path": "dynamic/browser/audio-bus.js",
-      "sha256": "19f5efa7858239d634198533b039faec86b167fa05790fcdf917fe07e4202d63"
+      "sha256": "9fd65de145ec99335b30b9a0a8f818ee1fe4d00b8c93dfce61dce2bd0559231e"
     },
     {
       "name": "performance-policy.js",
@@ -39,7 +39,7 @@
     {
       "name": "controls.js",
       "path": "dynamic/browser/controls.js",
-      "sha256": "b8b920dcd4032092f9c883300da92b2651b9d29a2e2a18c5833e907ded21addb"
+      "sha256": "953c7d05125bc1cee1e6304bdf71d541fdd0a4c6e82cbc28cc3e7757aa465f07"
     },
     {
       "name": "controller.js",
@@ -49,7 +49,7 @@
     {
       "name": "entry.js",
       "path": "dynamic/browser/entry.js",
-      "sha256": "221295d2c66bfb5ca6c203eac8f831f270a7036e8f67ef941d1dfdd216a4ce1e"
+      "sha256": "6d03a43f0c8bd47b14d9634a4f77c9c48972abd656fd538670f74f34efc61dce"
     }
   ]
 }

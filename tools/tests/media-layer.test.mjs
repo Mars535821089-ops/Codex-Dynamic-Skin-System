@@ -10,11 +10,11 @@ import { createLedger, FakeDocument } from "./helpers/fake-media.mjs";
 const projectRoot = fileURLToPath(new URL("../..", import.meta.url));
 const browserRoot = path.join(projectRoot, "runtime", "dynamic", "browser");
 
-async function loadService(document, reducedMotion = false) {
+async function loadService(document, reducedMotion = false, MutationObserver = undefined) {
   const windowEvents = new EventTarget();
   const context = vm.createContext({
     AbortController, DOMException, Event, EventTarget, Map, Object, Promise,
-    clearTimeout, setTimeout,
+    clearTimeout, setTimeout, MutationObserver,
   });
   context.window = context;
   context.document = document;
@@ -27,6 +27,28 @@ async function loadService(document, reducedMotion = false) {
   const service = context.__CODEX_DYNAMIC_SKIN_MODULES__.get("media-layer")({ document, window: context });
   service.__testWindow = context;
   return service;
+}
+
+class ManualMutationObserver {
+  static instances = [];
+
+  constructor(callback) {
+    this.callback = callback;
+    this.connected = false;
+    ManualMutationObserver.instances.push(this);
+  }
+
+  observe(target, options) {
+    this.target = target;
+    this.options = options;
+    this.connected = true;
+  }
+
+  disconnect() { this.connected = false; }
+
+  flush(records = [{ type: "childList" }]) {
+    if (this.connected) this.callback(records, this);
+  }
 }
 
 function config(overrides = {}) {
@@ -50,7 +72,7 @@ function config(overrides = {}) {
 
 async function prepareVideoLayer(layer, video) {
   const ready = layer.ready();
-  video.readyState = 1;
+  video.readyState = 0;
   video.emit("loadedmetadata");
   await new Promise((resolve) => setImmediate(resolve));
   video.emitFrame();
@@ -124,6 +146,41 @@ test("imported image uses a body-owned adaptive layer outside React's managed su
     "destroying the theme must restore foreground positioning");
   assert.equal(appRoot.style.zIndex, undefined,
     "destroying the theme must restore foreground stacking");
+});
+
+test("an active media layer immediately reattaches after foreign DOM removal and stays gone after destroy", async () => {
+  ManualMutationObserver.instances.length = 0;
+  const document = new FakeDocument();
+  const service = await loadService(document, false, ManualMutationObserver);
+  const imageConfig = config({
+    generation: "image-self-heal",
+    theme: {
+      visual: { kind: "image", asset: "media/visual.webp", fit: "cover", opacity: 1 },
+      audio: { ambient: { source: "none" }, ui: { events: {} } },
+    },
+    assets: { "media/visual.webp": "http://127.0.0.1:1234/t/g/media/visual.webp" },
+  });
+  const layer = service.create({ config: imageConfig, ledger: createLedger() });
+  const root = document.created.find((element) =>
+    element.getAttribute("data-dynamic-skin-root") !== null);
+
+  await layer.ready();
+  await layer.commit();
+  layer.reveal();
+  const observer = ManualMutationObserver.instances.at(-1);
+  assert.ok(observer?.connected, "the active layer must watch its body-owned root");
+
+  root.remove();
+  observer.flush();
+  assert.equal(root.parentNode, document.body,
+    "foreign DOM removal must reattach the same active root without waiting for controller polling");
+  assert.equal(document.body.children.filter((child) => child === root).length, 1,
+    "self-heal must not duplicate the media root");
+
+  await layer.destroy();
+  assert.equal(observer.connected, false, "destroy must stop root self-healing");
+  observer.flush();
+  assert.equal(root.parentNode, null, "destroyed media must never be resurrected");
 });
 
 test("hot switching keeps Codex content above the newly committed media layer", async () => {
@@ -272,7 +329,7 @@ test("video stays behind its poster until metadata and first decoded frame", asy
   assert.equal(video.muted, false);
 
   document.setHidden(true);
-  assert.equal(video.paused, false, "background playback defaults to continuing while hidden");
+  assert.equal(video.paused, false, "explicitly enabled background playback continues while hidden");
   document.setHidden(false);
   await Promise.resolve();
   assert.equal(video.playCount, 1, "returning must not restart a video that kept playing");
@@ -420,6 +477,69 @@ test("disabled background playback freezes on app blur and resumes on focus", as
   await Promise.resolve();
   assert.equal(video.paused, false, "returning to Codex must resume the same video");
   await layer.destroy();
+});
+
+test("a video first injected while unfocused starts on the first real focus", async () => {
+  const document = new FakeDocument();
+  document.hasFocus = () => false;
+  const service = await loadService(document);
+  const layer = service.create({
+    config: config({ settings: { reducedMotion: "off", visualOpacity: 1, backgroundPlayback: false } }),
+    ledger: createLedger(),
+  });
+  const video = document.created.find((element) => element.tagName === "VIDEO");
+  await prepareVideoLayer(layer, video);
+
+  assert.equal(video.paused, true, "an unfocused renderer must stay on its poster without consuming video frames");
+  service.__testWindow?.dispatchEvent?.(new Event("focus"));
+  await Promise.resolve();
+  assert.equal(video.paused, false, "first focus must start the staged video even though it was never playing before");
+  assert.equal(video.style.opacity, "1", "the first decoded foreground frame must replace the poster");
+  await layer.destroy();
+});
+
+test("a hidden unfocused injection commits its poster without waiting for a video frame", async () => {
+  const document = new FakeDocument();
+  document.hidden = true;
+  document.hasFocus = () => false;
+  const service = await loadService(document);
+  const layer = service.create({
+    config: config({ settings: { reducedMotion: "off", visualOpacity: 1, backgroundPlayback: false } }),
+    ledger: createLedger(),
+  });
+  const root = document.created.find((element) =>
+    element.getAttribute("data-dynamic-skin-root") !== null);
+  const video = document.created.find((element) => element.tagName === "VIDEO");
+  const poster = document.created.find((element) => element.tagName === "IMG");
+  video.readyState = 0;
+  poster.decode = () => new Promise(() => {});
+
+  try {
+    const becameReady = await Promise.race([
+      layer.ready().then(() => true),
+      new Promise((resolve) => setTimeout(() => resolve(false), 50)),
+    ]);
+    assert.equal(becameReady, true,
+      "background injection must not wait for image decode, metadata, or frame callbacks suspended while hidden");
+    assert.equal(video.frameCallback, undefined);
+
+    await layer.commit();
+    layer.reveal();
+    assert.equal(root.style.visibility, "visible");
+    assert.equal(poster.style.opacity, "1");
+    assert.equal(video.style.opacity, "0");
+    assert.equal(video.playCount, 0);
+
+    document.setHidden(false);
+    service.__testWindow?.dispatchEvent?.(new Event("focus"));
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(video.playCount, 1, "first foreground focus must start the staged video");
+    assert.equal(video.style.opacity, "1");
+    assert.equal(poster.style.opacity, "0");
+  } finally {
+    await layer.destroy();
+  }
 });
 
 test("disabling background playback reconciles focus lost before the media layer observed blur", async () => {

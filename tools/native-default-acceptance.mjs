@@ -13,6 +13,7 @@ import {
   createIsolation,
   discoverTarget,
   normalizeThemeDirectory,
+  ownedIsolationPidsFromProcessList,
 } from "./isolated-codex-acceptance.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -94,6 +95,13 @@ async function resolveExecutable(appPath) {
   return path.join(resolved, "Contents", "MacOS", stdout.trim());
 }
 
+export function nativeDefaultCleanupPidsFromProcessList(listing, profilePath, {
+  excludedPids = [process.pid],
+  root = projectRoot,
+} = {}) {
+  return ownedIsolationPidsFromProcessList(listing, profilePath, { excludedPids, root });
+}
+
 async function terminateProfileProcesses(profilePath) {
   let listing = "";
   try {
@@ -101,12 +109,7 @@ async function terminateProfileProcesses(profilePath) {
   } catch {
     return;
   }
-  const ownedPids = listing.split(/\r?\n/).flatMap((line) => {
-    const match = line.match(/^\s*(\d+)\s+(.+)$/);
-    if (!match || !match[2].includes(profilePath)) return [];
-    const pid = Number(match[1]);
-    return pid > 1 && pid !== process.pid ? [pid] : [];
-  });
+  const ownedPids = nativeDefaultCleanupPidsFromProcessList(listing, profilePath);
   for (const pid of ownedPids) {
     try { process.kill(pid, "SIGTERM"); } catch {}
   }

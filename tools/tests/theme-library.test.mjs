@@ -70,3 +70,38 @@ test("one-shot payload preparation includes the requested theme library", async 
   ]);
   assert.equal(JSON.stringify(loaded.dynamicRenderer.themeCatalog).includes(root), false);
 });
+
+test("a persisted library selection keeps the configured default theme switchable", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dream-skin-default-catalog-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const library = path.join(root, "library");
+  const fallbackParent = path.join(root, "fallback-parent");
+  await Promise.all([
+    fs.mkdir(library, { recursive: true }),
+    fs.mkdir(fallbackParent, { recursive: true }),
+  ]);
+  const selected = await makeV2Package(library, "selected", { mutateTheme(theme) {
+    theme.id = "com.example.selected"; theme.name = "Selected Theme";
+  }, mutateManifest(manifest) { manifest.themeId = "com.example.selected"; } });
+  const fallback = await makeV2Package(fallbackParent, "default", {
+    mutateTheme(theme) { theme.id = "com.example.default"; theme.name = "Default Theme"; },
+    mutateManifest(manifest) { manifest.themeId = "com.example.default"; },
+  });
+  await Promise.all([
+    fs.rm(path.join(selected.root, "manifest.json")),
+    fs.rm(path.join(fallback.root, "manifest.json")),
+  ]);
+
+  const loaded = await injector.loadPayloadForOptions({
+    themeDir: selected.root,
+    themeLibrary: library,
+    fallbackThemeDir: fallback.root,
+  });
+
+  assert.deepEqual(loaded.dynamicRenderer.themeCatalog.map(({ id }) => id), [
+    "com.example.default",
+    "com.example.selected",
+  ]);
+  assert.equal(loaded.themeDirectories.get("com.example.default"), await fs.realpath(fallback.root));
+  assert.equal(loaded.themeDirectories.get("com.example.selected"), await fs.realpath(selected.root));
+});

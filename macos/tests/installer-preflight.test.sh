@@ -121,6 +121,109 @@ fi
 [ ! -e "$TEST_HOME/.codex/config.toml" ]
 [ ! -e "$TEST_HOME/Library/Application Support/CodexDreamSkinStudio/state.json" ]
 
+# A direct install from a dirty Git checkout must deploy only tracked project
+# files. Local notes, credentials, build artifacts, and other untracked files
+# must never be copied into the managed engine directory.
+DIRTY_SOURCE="$TMP/dirty-source"
+DIRTY_HOME="$TMP/dirty-home"
+/bin/mkdir -p "$DIRTY_SOURCE" "$DIRTY_HOME/.codex"
+/usr/bin/rsync -a --exclude 'release/' "$ROOT/" "$DIRTY_SOURCE/"
+/usr/bin/git -C "$DIRTY_SOURCE" init -q
+/usr/bin/git -C "$DIRTY_SOURCE" add --all
+/usr/bin/printf 'untracked sentinel\n' > "$DIRTY_SOURCE/local-untracked-sentinel.txt"
+if ! /usr/bin/env -u CODEX_EXE -u CODEX_BUNDLE \
+  HOME="$DIRTY_HOME" CODEX_APP_BUNDLE="$FAKE_APP" \
+  "$DIRTY_SOURCE/scripts/install-dream-skin-macos.sh" --engine-only --port 19343 \
+  >"$OUTPUT" 2>&1; then
+  /bin/cat "$OUTPUT" >&2
+  printf 'Engine-only installation from a dirty checkout failed.\n' >&2
+  exit 1
+fi
+[ -f "$DIRTY_HOME/.codex/codex-dream-skin-studio/VERSION" ]
+[ ! -e "$DIRTY_HOME/.codex/codex-dream-skin-studio/local-untracked-sentinel.txt" ]
+
+# A tracked symbolic link is never a deployable installer input. Refusal must
+# also leave no partial staging directory behind.
+/bin/ln -s VERSION "$DIRTY_SOURCE/tracked-link"
+/usr/bin/git -C "$DIRTY_SOURCE" add tracked-link
+if /usr/bin/env -u CODEX_EXE -u CODEX_BUNDLE \
+  HOME="$DIRTY_HOME" CODEX_APP_BUNDLE="$FAKE_APP" \
+  "$DIRTY_SOURCE/scripts/install-dream-skin-macos.sh" --engine-only --port 19343 \
+  >"$OUTPUT" 2>&1; then
+  printf 'Installer accepted a tracked symbolic link.\n' >&2
+  exit 1
+fi
+/usr/bin/grep -F -q 'Tracked installer input must be a regular file' "$OUTPUT"
+[ -z "$(/usr/bin/find "$DIRTY_HOME/.codex" -maxdepth 1 \
+  -name 'codex-dream-skin-studio.installing.*' -print -quit)" ]
+
+# Replacing a tracked directory with a symbolic link after it was added to Git
+# must not turn its tracked child into an external installer input.
+/usr/bin/git -C "$DIRTY_SOURCE" reset -q tracked-link
+/bin/rm -f "$DIRTY_SOURCE/tracked-link"
+/bin/mkdir -p "$DIRTY_SOURCE/tracked-parent" "$TMP/outside-tracked-parent"
+/usr/bin/printf 'tracked\n' > "$DIRTY_SOURCE/tracked-parent/file.txt"
+/usr/bin/git -C "$DIRTY_SOURCE" add tracked-parent/file.txt
+/usr/bin/printf 'outside\n' > "$TMP/outside-tracked-parent/file.txt"
+/bin/rm -rf "$DIRTY_SOURCE/tracked-parent"
+/bin/ln -s "$TMP/outside-tracked-parent" "$DIRTY_SOURCE/tracked-parent"
+if /usr/bin/env -u CODEX_EXE -u CODEX_BUNDLE \
+  HOME="$DIRTY_HOME" CODEX_APP_BUNDLE="$FAKE_APP" \
+  "$DIRTY_SOURCE/scripts/install-dream-skin-macos.sh" --engine-only --port 19343 \
+  >"$OUTPUT" 2>&1; then
+  printf 'Installer accepted a tracked file through a symbolic-link directory.\n' >&2
+  exit 1
+fi
+/usr/bin/grep -F -q 'Tracked installer input must be a regular file' "$OUTPUT"
+[ -z "$(/usr/bin/find "$DIRTY_HOME/.codex" -maxdepth 1 \
+  -name 'codex-dream-skin-studio.installing.*' -print -quit)" ]
+
+# Official release directories have no .git metadata. They must carry an
+# explicit install manifest so unrelated extracted files are not copied into
+# the managed engine.
+RELEASE_SOURCE="$TMP/release-source"
+RELEASE_HOME="$TMP/release-home"
+/bin/mkdir -p "$RELEASE_SOURCE" "$RELEASE_HOME/.codex"
+/usr/bin/rsync -a --exclude 'release/' "$ROOT/" "$RELEASE_SOURCE/"
+/usr/bin/printf 'must not install\n' > "$RELEASE_SOURCE/local-release-sentinel.txt"
+(
+  cd "$RELEASE_SOURCE"
+  {
+    /usr/bin/find . -type f \
+      ! -name 'INSTALL-FILES.txt' \
+      ! -name 'local-release-sentinel.txt' \
+      -print | /usr/bin/sed 's#^\./##'
+    /usr/bin/printf 'INSTALL-FILES.txt\n'
+  } | LC_ALL=C /usr/bin/sort > INSTALL-FILES.txt
+)
+if ! /usr/bin/env -u CODEX_EXE -u CODEX_BUNDLE \
+  HOME="$RELEASE_HOME" CODEX_APP_BUNDLE="$FAKE_APP" \
+  "$RELEASE_SOURCE/scripts/install-dream-skin-macos.sh" --engine-only --port 19344 \
+  >"$OUTPUT" 2>&1; then
+  /bin/cat "$OUTPUT" >&2
+  printf 'Engine-only installation from a release manifest failed.\n' >&2
+  exit 1
+fi
+[ -f "$RELEASE_HOME/.codex/codex-dream-skin-studio/VERSION" ]
+[ ! -e "$RELEASE_HOME/.codex/codex-dream-skin-studio/local-release-sentinel.txt" ]
+
+# A manifest entry reached through a symbolic-link directory is not a regular
+# package input, even when the final path resolves to an ordinary file.
+/bin/mkdir -p "$TMP/outside-release"
+/usr/bin/printf 'outside\n' > "$TMP/outside-release/file.txt"
+/bin/ln -s "$TMP/outside-release" "$RELEASE_SOURCE/linked-parent"
+/usr/bin/printf 'linked-parent/file.txt\n' >> "$RELEASE_SOURCE/INSTALL-FILES.txt"
+if /usr/bin/env -u CODEX_EXE -u CODEX_BUNDLE \
+  HOME="$RELEASE_HOME" CODEX_APP_BUNDLE="$FAKE_APP" \
+  "$RELEASE_SOURCE/scripts/install-dream-skin-macos.sh" --engine-only --port 19344 \
+  >"$OUTPUT" 2>&1; then
+  printf 'Release installer accepted a manifest path through a symbolic link.\n' >&2
+  exit 1
+fi
+/usr/bin/grep -F -q 'Release manifest input must be a regular file' "$OUTPUT"
+[ -z "$(/usr/bin/find "$RELEASE_HOME/.codex" -maxdepth 1 \
+  -name 'codex-dream-skin-studio.installing.*' -print -quit)" ]
+
 # Legacy launchers remain explicit opt-in and may also be refreshed safely
 # while Codex is open.
 if ! /usr/bin/env -u CODEX_EXE -u CODEX_BUNDLE \

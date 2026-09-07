@@ -35,6 +35,7 @@ import {
   summarizeRendererSamples,
   themeSwitchAuditsPass,
 } from "../isolated-codex-acceptance.mjs";
+import { nativeDefaultCleanupPidsFromProcessList } from "../native-default-acceptance.mjs";
 
 test("attached theme-switch acceptance requires an explicit post-test outcome", () => {
   const attach = [
@@ -144,6 +145,73 @@ test("waits for one owned cleanup before exiting on repeated termination signals
   dispose();
   assert.equal(fakeProcess.listenerCount("SIGINT"), 0);
   assert.equal(fakeProcess.listenerCount("SIGTERM"), 0);
+});
+
+test("a successful CDP open does not keep the audit process alive until its timeout", async (t) => {
+  const moduleUrl = new URL("../isolated-codex-acceptance.mjs", import.meta.url).href;
+  const source = [
+    "class FakeWebSocket extends EventTarget {",
+    "  static OPEN = 1;",
+    "  constructor() { super(); this.readyState = 0; queueMicrotask(() => { this.readyState = 1; this.dispatchEvent(new Event('open')); }); }",
+    "  send() {}",
+    "  close() { this.readyState = 3; }",
+    "}",
+    "globalThis.WebSocket = FakeWebSocket;",
+    `const { CdpSession } = await import(${JSON.stringify(moduleUrl)});`,
+    "const session = new CdpSession('ws://isolated.test');",
+    "await session.open(2_000);",
+    "session.close();",
+  ].join("\n");
+  const startedAt = performance.now();
+  const child = spawn(process.execPath, ["--input-type=module", "-e", source], {
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  t.after(() => {
+    if (child.exitCode === null && !child.killed) child.kill("SIGKILL");
+  });
+
+  const result = await Promise.race([
+    once(child, "exit").then(([code, signal]) => ({ code, signal })),
+    new Promise((resolve) => setTimeout(() => resolve({ timedOut: true }), 750)),
+  ]);
+  if (result.timedOut) child.kill("SIGKILL");
+
+  assert.deepEqual(result, { code: 0, signal: null });
+  assert.ok(performance.now() - startedAt < 750, "successful open retained its timeout timer");
+});
+
+test("a CDP call can reject a renderer that never answers", async (t) => {
+  const moduleUrl = new URL("../isolated-codex-acceptance.mjs", import.meta.url).href;
+  const source = [
+    "class FakeWebSocket extends EventTarget {",
+    "  static OPEN = 1;",
+    "  constructor() { super(); this.readyState = 1; }",
+    "  send() {}",
+    "  close() { this.readyState = 3; }",
+    "}",
+    "globalThis.WebSocket = FakeWebSocket;",
+    `const { CdpSession } = await import(${JSON.stringify(moduleUrl)});`,
+    "const session = new CdpSession('ws://isolated.test');",
+    "try {",
+    "  await session.call('Runtime.evaluate', {}, 25);",
+    "  process.exitCode = 2;",
+    "} catch (error) {",
+    "  if (!/CDP call timed out/.test(String(error?.message))) process.exitCode = 3;",
+    "} finally { session.close(); }",
+  ].join("\n");
+  const child = spawn(process.execPath, ["--input-type=module", "-e", source], {
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  t.after(() => {
+    if (child.exitCode === null && !child.killed) child.kill("SIGKILL");
+  });
+
+  const result = await Promise.race([
+    once(child, "exit").then(([code, signal]) => ({ code, signal })),
+    new Promise((resolve) => setTimeout(() => resolve({ timedOut: true }), 750)),
+  ]);
+  if (result.timedOut) child.kill("SIGKILL");
+  assert.deepEqual(result, { code: 0, signal: null });
 });
 
 test("removes project-owned state before a real SIGINT exits the process", async (t) => {
@@ -345,6 +413,24 @@ test("finds only processes owned by the exact project-isolated profile", () => {
   assert.match(windows.args.join(" "), /ProcessId -ne \$PID/);
   assert.throws(() => buildPlatformIsolationProcessListProbe("linux", profilePath),
     /unsupported platform/i);
+});
+
+test("native-default cleanup uses the same exact isolated-profile boundary", () => {
+  const root = "/project/Codex Dynamic Skin System";
+  const profilePath = `${root}/work/isolated-profiles/codex-dream-skin-acceptance.safe`;
+  const listing = [
+    ` 510 /Applications/ChatGPT.app/Contents/MacOS/Codex --user-data-dir=${profilePath}`,
+    ` 511 /Applications/ChatGPT.app/Helpers/crashpad --database=${profilePath}/Crashpad`,
+    ` 512 /bin/zsh -lc echo ${profilePath}-similar`,
+    " 513 /Applications/ChatGPT.app/Contents/MacOS/Codex --user-data-dir=/tmp/unrelated",
+  ].join("\n");
+
+  assert.deepEqual(nativeDefaultCleanupPidsFromProcessList(listing, profilePath, {
+    excludedPids: [510],
+    root,
+  }), [511]);
+  assert.throws(() => nativeDefaultCleanupPidsFromProcessList(listing, "/tmp/outside", { root }),
+    /inside the project/i);
 });
 
 test("builds a bounded native focus sink for background playback evidence", () => {

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -32,4 +34,18 @@ test("background playback capability follows the real Codex process arguments", 
 
   const unsupported = spawnSync("/bin/bash", ["-c", `. "$1"; codex_process_has_background_playback_flags "$2"`, "_", common, String(process.pid)]);
   assert.notEqual(unsupported.status, 0, "an ordinary process must not be advertised as background-playback capable");
+});
+
+test("persisted background playback opt-in controls anti-throttled launches", (t) => {
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "dreamskin-background-setting."));
+  t.after(() => fs.rmSync(stateRoot, { recursive: true, force: true }));
+  const settings = path.join(stateRoot, "dynamic-settings.json");
+  const probe = () => spawnSync("/bin/bash", ["-c",
+    '. "$1"; NODE="$2"; STATE_ROOT="$3"; dynamic_background_playback_enabled',
+    "_", common, process.execPath, stateRoot]);
+  assert.notEqual(probe().status, 0, "a missing setting must default to efficient background pausing");
+  fs.writeFileSync(settings, '{"schemaVersion":1,"backgroundPlayback":false}\n');
+  assert.notEqual(probe().status, 0);
+  fs.writeFileSync(settings, '{"schemaVersion":1,"backgroundPlayback":true}\n');
+  assert.equal(probe().status, 0);
 });

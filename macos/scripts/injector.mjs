@@ -321,6 +321,9 @@ export function assessRendererVerification(renderer, nativeWindow, expected) {
   const viewportHeight = Number(result.viewport?.height);
   const viewportPass = hasReasonableDimensions(viewportWidth, viewportHeight);
   const documentVisible = result.documentVisibility === "visible";
+  const hiddenDocumentAllowed = expected.allowHiddenDocument === true
+    && result.documentVisibility === "hidden";
+  const documentReady = documentVisible || hiddenDocumentAllowed;
   const settingsRoute = result.scope?.baseState === "settings";
   const homeRoute = result.scope?.baseState === "home" || result.homeRoute || result.homePresent;
   const l1ScopePass = result.scope?.level === "L1" &&
@@ -334,7 +337,7 @@ export function assessRendererVerification(renderer, nativeWindow, expected) {
   ));
   const nativeWindowPass = nativeWindow?.status === "ready";
   const fallbackWindowPass = nativeWindow?.status === "unsupported";
-  const windowPass = documentVisible && viewportPass
+  const windowPass = documentReady && viewportPass
     && (nativeWindowPass || fallbackWindowPass);
   const basePass = result.installed && result.version === expected.skinVersion
     && result.stylePresent && result.businessClassPollution === 0
@@ -370,6 +373,7 @@ export function assessRendererVerification(renderer, nativeWindow, expected) {
   result.nativeWindow = nativeWindow;
   result.checks = {
     documentVisible,
+    hiddenDocumentAllowed,
     fallbackWindowPass,
     nativeWindowPass,
     payloadPass,
@@ -393,6 +397,26 @@ export function assessRendererVerification(renderer, nativeWindow, expected) {
 
 export function shouldWaitForEarlyGeneration(reason, loaded) {
   return reason === "Page.loadEventFired" && Boolean(loaded?.dynamicRenderer);
+}
+
+export function earlyGenerationWaitOptions(reason) {
+  return reason === "Page.loadEventFired"
+    ? { timeoutMs: 1250, pollMs: 50 }
+    : { timeoutMs: 0, pollMs: 50 };
+}
+
+export async function cancelPendingEarlyGeneration(session, revision) {
+  return session.evaluate(`(() => {
+    const key = "__CODEX_DREAM_SKIN_EARLY_GENERATION__";
+    const expectedGeneration = ${JSON.stringify(revision)};
+    const activeGeneration = window[key];
+    if (typeof activeGeneration !== "string" || activeGeneration.startsWith("cancelled:")) {
+      return false;
+    }
+    window[key] = "cancelled:" + activeGeneration + ":superseded-by:"
+      + expectedGeneration + ":" + Date.now();
+    return true;
+  })()`);
 }
 
 export function parseArgs(argv) {
@@ -1322,6 +1346,7 @@ async function readSharedSettings(settingsPath) {
 export async function loadPayloadForOptions({
   themeDir,
   themeLibrary = null,
+  fallbackThemeDir = null,
   settings: settingsPath = null,
   backgroundPlaybackCapable = false,
   storage,
@@ -1365,6 +1390,26 @@ export async function loadPayloadForOptions({
       themeDirectories.set(initial.theme.id, await fs.realpath(themeDir));
       themeCatalog = [...themeCatalog, { id: initial.theme.id, name: initial.theme.name }]
         .sort((a, b) => a.id.localeCompare(b.id, "en"));
+    }
+  }
+  if (fallbackThemeDir) {
+    const realFallback = await fs.realpath(fallbackThemeDir);
+    const fallback = await loadInstalledSkin(realFallback, { platform: "macos", clientVersion: "2.0.0" });
+    if (fallback.sourceApiVersion !== 2) {
+      throw new Error("configured default theme must use Skin API v2");
+    }
+    if (!themeDirectories.has(fallback.theme.id)) {
+      themeDirectories.set(fallback.theme.id, realFallback);
+      let thumbnail;
+      try { thumbnail = await createThemeThumbnailDataUrl(realFallback, fallback.theme); } catch {}
+      themeCatalog = [...themeCatalog, {
+        id: fallback.theme.id,
+        name: fallback.theme.name,
+        kind: fallback.theme.visual.kind,
+        hasAudio: fallback.theme.audio.ambient.source !== "none"
+          || Object.keys(fallback.theme.audio.ui.events).length > 0,
+        ...(thumbnail ? { thumbnail } : {}),
+      }].sort((a, b) => a.id.localeCompare(b.id, "en"));
     }
   }
   const loaded = await loadPayload(themeDir, { themeCatalog, ...dynamicSettings,
@@ -1762,7 +1807,7 @@ export async function inspectNativeWindow(session) {
 
 export async function verifySession(
   session, expectedThemeId = null, expectedRevision = null, expectedDynamic = false,
-  evaluationTimeoutMs = 10000,
+  evaluationTimeoutMs = 10000, allowHiddenDocument = false,
 ) {
   const renderer = await session.evaluate(`(() => {
     const box = (node) => {
@@ -1907,6 +1952,7 @@ export async function verifySession(
     expectedThemeId,
     expectedRevision,
     expectedDynamic,
+    allowHiddenDocument,
   });
 }
 
@@ -1917,6 +1963,7 @@ export async function waitForVerifiedSession(
   expectedRevision = null,
   retryDelayMs = 500,
   expectedDynamic = false,
+  allowHiddenDocument = false,
 ) {
   const deadline = Date.now() + timeoutMs;
   const retryDelay = Number.isFinite(retryDelayMs) && retryDelayMs >= 0 ? retryDelayMs : 500;
@@ -1929,6 +1976,8 @@ export async function waitForVerifiedSession(
         expectedThemeId,
         expectedRevision,
         expectedDynamic,
+        10000,
+        allowHiddenDocument,
       );
       lastError = null;
       if (lastResult.pass) return lastResult;
@@ -2008,7 +2057,9 @@ export async function waitForNativeControlSession(
   return lastResult;
 }
 
-async function waitForLoadedSession(session, loaded, timeoutMs, retryDelayMs = 500) {
+async function waitForLoadedSession(
+  session, loaded, timeoutMs, retryDelayMs = 500, allowHiddenDocument = false,
+) {
   if (loaded?.displayMode === "native") {
     return waitForNativeControlSession(session, timeoutMs, loaded.revision, retryDelayMs);
   }
@@ -2019,7 +2070,54 @@ async function waitForLoadedSession(session, loaded, timeoutMs, retryDelayMs = 5
     loaded?.revision ?? null,
     retryDelayMs,
     loaded?.sourceApiVersion === 2,
+    allowHiddenDocument,
   );
+}
+
+export function isLoadedThemeOwnershipHealthy(verification, loaded) {
+  if (loaded?.displayMode === "native") return verification?.pass === true;
+  const dynamicHealthy = loaded?.sourceApiVersion !== 2 || (
+    verification?.dynamic?.activation === "active"
+    && verification?.dynamic?.diagnostics?.phase === "active"
+    && verification?.dynamicRootCount === 1
+    && (verification?.documentVisibility === "hidden"
+      || verification?.dynamicVisibleRootCount === 1)
+  );
+  return Boolean(
+    verification?.installed
+    && verification?.version === SKIN_VERSION
+    && verification?.stylePresent
+    && verification?.businessClassPollution === 0
+    && verification?.themeId === loaded?.theme?.id
+    && verification?.revision === loaded?.revision
+    && verification?.documentOverflow?.x === false
+    && dynamicHealthy
+  );
+}
+
+async function waitForLoadedOwnershipSession(
+  session, loaded, timeoutMs, retryDelayMs = 250,
+) {
+  if (loaded?.displayMode === "native") {
+    return waitForNativeControlSession(session, timeoutMs, loaded.revision, retryDelayMs);
+  }
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  let lastResult;
+  let lastError;
+  while (Date.now() < deadline) {
+    try {
+      lastResult = await verifyLoadedSessionOnce(
+        session, loaded, Math.max(1, Math.min(1000, deadline - Date.now())),
+      );
+      lastError = null;
+      if (isLoadedThemeOwnershipHealthy(lastResult, loaded)) return lastResult;
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, Math.max(1, retryDelayMs)));
+  }
+  if (!lastResult && lastError) throw lastError;
+  return lastResult;
 }
 
 async function verifyLoadedSessionOnce(session, loaded, timeoutMs = 1500) {
@@ -2259,6 +2357,7 @@ export function earlyPayloadFor(payload, revision) {
     };
     const install = () => {
       if (window[generationKey] !== generation) { stop(); return true; }
+      if (window[appliedKey] === generation) { stop(); return true; }
       if (!document.documentElement || !hasCodexSurface()) return false;
       stop();
       ${payload};
@@ -2732,7 +2831,7 @@ async function runOwnedWatch(options) {
         await applyLoadedToSession(session, next);
         if (controlOnly || mutationEpoch !== refreshEpoch) continue;
         const verification = await waitForLoadedSession(
-          session, next, Math.min(options.timeoutMs, 8000), 500,
+          session, next, Math.min(options.timeoutMs, 8000), 500, true,
         );
         if (!verification?.pass) throw new Error("Theme refresh verification failed");
         applied += 1;
@@ -2774,7 +2873,7 @@ async function runOwnedWatch(options) {
           try {
             await applyLoadedToSession(record.session, previous);
             const rollback = await waitForLoadedSession(
-              record.session, previous, Math.min(options.timeoutMs, 8000), 500,
+              record.session, previous, Math.min(options.timeoutMs, 8000), 500, true,
             );
             if (!rollback?.pass) throw new Error("Theme rollback verification failed");
             record.needsLoadFallback = !record.earlyScriptId;
@@ -2829,7 +2928,14 @@ async function runOwnedWatch(options) {
         if (shouldWaitForEarlyGeneration(reason, loaded)) {
           // Let the persistent early shell finish before restoring blob-backed
           // media, otherwise its late cleanup can remove the recovered layer.
-          await waitForEarlyGenerationApplied(record.session, loaded.revision);
+          const earlyApplied = await waitForEarlyGenerationApplied(
+            record.session,
+            loaded.revision,
+            earlyGenerationWaitOptions(reason),
+          );
+          if (!earlyApplied) {
+            await cancelPendingEarlyGeneration(record.session, loaded.revision);
+          }
         }
         if (stopping || controlOnly || record.session.closed || sessions.get(targetId) !== record) {
           await removeEarlyIdentifier(record, nextIdentifier);
@@ -2840,10 +2946,12 @@ async function runOwnedWatch(options) {
           continue;
         }
         await applyLoadedToSession(record.session, loaded);
-        const verification = await waitForLoadedSession(
-          record.session, loaded, Math.min(options.timeoutMs, 8000), 500,
+        const verification = await waitForLoadedOwnershipSession(
+          record.session, loaded, Math.min(options.timeoutMs, 3000), 250,
         );
-        if (!verification?.pass) throw new Error("Recovered theme verification failed");
+        if (!isLoadedThemeOwnershipHealthy(verification, loaded)) {
+          throw new Error("Recovered theme ownership verification failed");
+        }
         if (stopping || controlOnly || record.session.closed || sessions.get(targetId) !== record) {
           await removeEarlyIdentifier(record, nextIdentifier);
           return false;
@@ -3253,7 +3361,24 @@ async function runOwnedWatch(options) {
           record.nextHealthCheckAt = healthNow + 4000;
           try {
             const verification = await verifyLoadedSessionOnce(record.session, current, 1500);
-            if (!verification?.pass) throw new Error("theme ownership verification failed");
+            if (!isLoadedThemeOwnershipHealthy(verification, current)) {
+              debugTrace("health-check-failed", {
+                targetId: id,
+                installed: verification?.installed,
+                version: verification?.version,
+                stylePresent: verification?.stylePresent,
+                businessClassPollution: verification?.businessClassPollution,
+                themeId: verification?.themeId,
+                revision: verification?.revision,
+                documentVisibility: verification?.documentVisibility,
+                documentOverflowX: verification?.documentOverflow?.x,
+                dynamicActivation: verification?.dynamic?.activation,
+                dynamicPhase: verification?.dynamic?.diagnostics?.phase,
+                dynamicRootCount: verification?.dynamicRootCount,
+                dynamicVisibleRootCount: verification?.dynamicVisibleRootCount,
+              });
+              throw new Error("theme ownership verification failed");
+            }
             record.healthFailureCount = 0;
           } catch {
             record.healthFailureCount += 1;
@@ -3489,7 +3614,7 @@ async function runOwnedWatch(options) {
             continue;
           }
           const verification = await waitForLoadedSession(
-            session, current, Math.min(options.timeoutMs, 8000), 500,
+            session, current, Math.min(options.timeoutMs, 8000), 500, true,
           );
           if (!verification?.pass) throw new Error("Initial theme verification failed");
           record.ready = true;

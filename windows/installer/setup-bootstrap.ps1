@@ -53,8 +53,34 @@ function Wait-DreamSkinCodexClosedForSetup {
   }
 }
 
+function Compare-DreamSkinBootstrapVersionComponent {
+  param(
+    [Parameter(Mandatory = $true)][string]$Left,
+    [Parameter(Mandatory = $true)][string]$Right
+  )
+  if ($Left.Length -gt $Right.Length) { return 1 }
+  if ($Left.Length -lt $Right.Length) { return -1 }
+  return [string]::Compare($Left, $Right, [System.StringComparison]::Ordinal)
+}
+
+function Compare-DreamSkinBootstrapVersion {
+  param(
+    [Parameter(Mandatory = $true)][string]$Left,
+    [Parameter(Mandatory = $true)][string]$Right
+  )
+  $leftParts = $Left.Split('.')
+  $rightParts = $Right.Split('.')
+  for ($index = 0; $index -lt 3; $index += 1) {
+    $comparison = Compare-DreamSkinBootstrapVersionComponent `
+      -Left $leftParts[$index] -Right $rightParts[$index]
+    if ($comparison -ne 0) { return $comparison }
+  }
+  return 0
+}
+
 try {
-  if ($Install -and ($LaunchTray -or $Uninstall)) {
+  $actionCount = @($Install, $LaunchTray, $Uninstall).Where({ [bool]$_ }).Count
+  if ($actionCount -ne 1) {
     throw 'Choose exactly one installer bootstrap action.'
   }
   if (-not (Test-Path -LiteralPath $commonPath -PathType Leaf) -or
@@ -104,7 +130,7 @@ try {
     ([System.IO.File]::ReadAllText($engine.Version)).Trim()
   } else { '' }
   if ($installedVersion -cmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' -and
-    ([version]$installedVersion) -gt ([version]$payloadVersion)) {
+    (Compare-DreamSkinBootstrapVersion -Left $installedVersion -Right $payloadVersion) -gt 0) {
     throw "A newer Codex Dream Skin v$installedVersion is already installed. Download that version or newer instead of downgrading to v$payloadVersion."
   }
   $backupExists = Test-Path -LiteralPath (Join-Path $stateRoot 'config.before-dream-skin.toml') -PathType Leaf

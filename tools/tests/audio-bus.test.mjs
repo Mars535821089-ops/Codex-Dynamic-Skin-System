@@ -61,7 +61,15 @@ const settings = {
   ambientMuted: false, uiMuted: false, hiddenAudio: "pause",
 };
 
-async function harness({ source = "visual", fetchBytes = 8, fetchImpl, assetUrl = "http://local/done", now } = {}) {
+async function harness({
+  source = "visual",
+  fetchBytes = 8,
+  fetchImpl,
+  assetUrl = "http://local/done",
+  now,
+  setTimeoutImpl = setTimeout,
+  clearTimeoutImpl = clearTimeout,
+} = {}) {
   FakeAudioContext.instances.length = 0;
   FakeAudioContext.mediaElements = new WeakSet();
   const document = new FakeDocument();
@@ -69,7 +77,7 @@ async function harness({ source = "visual", fetchBytes = 8, fetchImpl, assetUrl 
   const mediaLayer = { visualAudioElement: () => visual, setAmbientMuted: (value) => { visual.muted = value; } };
   const context = vm.createContext({
     AbortController, ArrayBuffer, DOMException, Event, EventTarget, Map, Object, Promise, Set,
-    clearTimeout, setTimeout, AudioContext: FakeAudioContext,
+    clearTimeout: clearTimeoutImpl, setTimeout: setTimeoutImpl, AudioContext: FakeAudioContext,
     fetch: fetchImpl ?? (async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(fetchBytes) })),
   });
   context.window = context;
@@ -205,5 +213,30 @@ test("a transient UI clip fetch failure cannot poison or rebind visual audio", a
   assert.equal(bus.diagnostics().unlocked, true);
   assert.equal(bus.diagnostics().uiStatus, "degraded");
   assert.equal(FakeAudioContext.instances.length, 1);
+  await bus.destroy();
+});
+
+test("a UI clip endpoint that never responds cannot leave audio unlock pending", async () => {
+  let receivedSignal = null;
+  const { bus } = await harness({
+    setTimeoutImpl(callback) { queueMicrotask(callback); return 1; },
+    clearTimeoutImpl() {},
+    fetchImpl: async (_url, options) => {
+      receivedSignal = options?.signal ?? null;
+      return await new Promise((_resolve, reject) => {
+        receivedSignal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")),
+          { once: true });
+      });
+    },
+  });
+
+  await Promise.race([
+    bus.unlockFromGesture({ isTrusted: true }),
+    new Promise((_resolve, reject) => setTimeout(() => reject(new Error("audio unlock remained pending")), 250)),
+  ]);
+
+  assert.equal(receivedSignal?.aborted, true);
+  assert.equal(bus.diagnostics().status, "active");
+  assert.equal(bus.diagnostics().uiStatus, "degraded");
   await bus.destroy();
 });

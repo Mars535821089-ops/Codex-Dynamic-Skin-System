@@ -58,7 +58,7 @@ function deepFreeze(value) {
 
 export const DEFAULT_DYNAMIC_SETTINGS = deepFreeze({
   schemaVersion: 1,
-  backgroundPlayback: true,
+  backgroundPlayback: false,
   soundEnabled: false,
   masterVolume: 1,
   ambientVolume: 0.7,

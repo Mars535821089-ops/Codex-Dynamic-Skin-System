@@ -76,7 +76,7 @@ test("only a dynamic page reload waits for the early generation marker", () => {
   );
   assert.match(
     injectorSource,
-    /if \(shouldWaitForEarlyGeneration\(reason, loaded\)\) \{[\s\S]*?waitForEarlyGenerationApplied\(record\.session, loaded\.revision\);/,
+    /if \(shouldWaitForEarlyGeneration\(reason, loaded\)\) \{[\s\S]*?waitForEarlyGenerationApplied\([\s\S]*?record\.session,[\s\S]*?loaded\.revision,[\s\S]*?earlyGenerationWaitOptions\(reason\)[\s\S]*?cancelPendingEarlyGeneration\(record\.session, loaded\.revision\)/,
     "the live recovery branch must use the reason-aware wait policy",
   );
 });

@@ -3,7 +3,7 @@
 ## Requirements
 
 - Windows 10 or 11 with the official Codex Desktop application launched once
-- Node.js 20 or newer for source installation
+- Node.js 22 or newer for source installation
 - PowerShell 5.1 or newer
 - A standard user account; elevation is not required for the per-user installation
 
@@ -18,15 +18,13 @@
    ```
 
 3. Start Codex from the generated **Codex Dream Skin** desktop or Start-menu shortcut. The shortcut asks before closing an already open Codex window.
-4. Import or select a theme with:
+4. Use the **Codex Dream Skin** icon in the Windows system tray (notification area) to import, select, pause, or resume a theme. `theme-windows.ps1` is an internal function library, not an interactive command.
 
-   ```powershell
-   & ".\windows\scripts\theme-windows.ps1"
-   ```
-
-The installer does not silently restart Codex. It creates per-user launch and tray shortcuts by default and starts only the tray controller. Pass `-NoShortcuts` for an engine-only installation. A machine-wide execution-policy change and `Run as administrator` are not required; organization-managed policy can still prevent local scripts from running.
+The installer does not silently restart Codex. It creates per-user launch and tray shortcuts by default and starts only the system tray controller. Pass `-NoShortcuts` for an engine-only installation. A machine-wide execution-policy change and `Run as administrator` are not required; organization-managed policy can still prevent local scripts from running.
 
 User themes and state are stored below `%LOCALAPPDATA%\CodexDreamSkin`. The injector validates the selected official application and does not patch its packaged source.
+
+Video background playback is disabled by default to reduce GPU and CPU use while Codex is not active. If you enable it in the theme center, restart the themed Codex session once so the required process capability can take effect. Turning it back off also takes full effect after the next restart.
 
 ## Restore or uninstall
 

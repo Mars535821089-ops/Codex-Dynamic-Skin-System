@@ -42,17 +42,95 @@ done
 case "$PORT" in ''|*[!0-9]*) fail "Invalid port: $PORT" ;; esac
 [ "$PORT" -ge 1024 ] && [ "$PORT" -le 65535 ] || fail "Port must be between 1024 and 65535."
 
+installer_input_is_regular() {
+  local root="$1"
+  local relative="$2"
+  local current="$root"
+  local component=""
+  local saved_ifs="$IFS"
+  local components=()
+  IFS='/'
+  read -r -a components <<< "$relative"
+  IFS="$saved_ifs"
+  for component in "${components[@]}"; do
+    current="$current/$component"
+    [ ! -L "$current" ] || return 1
+  done
+  [ -f "$current" ]
+}
+
 deploy_project() {
   local temporary="$INSTALL_ROOT.installing.$$"
   local previous="$INSTALL_ROOT.previous.$$"
+  local tracked_manifest="$INSTALL_ROOT.tracked.$$"
+  local tracked_path=""
+  local tracked_count=0
   /bin/rm -rf "$temporary"
-  /bin/mkdir -p "$temporary"
-  /usr/bin/rsync -a \
-    --exclude '.git/' \
-    --exclude '.DS_Store' \
-    --exclude 'release/' \
-    --exclude 'runtime/' \
-    "$PROJECT_ROOT/" "$temporary/"
+  /bin/rm -f "$tracked_manifest"
+  if /usr/bin/git -C "$PROJECT_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    /usr/bin/git -C "$PROJECT_ROOT" ls-files -z -- . > "$tracked_manifest" \
+      || { /bin/rm -f "$tracked_manifest"; fail "Could not enumerate tracked installer files."; }
+    while IFS= read -r -d '' tracked_path; do
+      case "$tracked_path" in
+        ''|/*|..|../*|*/../*|release|release/*|runtime|runtime/*)
+          /bin/rm -f "$tracked_manifest"
+          fail "Refusing unsafe tracked installer path: $tracked_path"
+          ;;
+      esac
+      if ! installer_input_is_regular "$PROJECT_ROOT" "$tracked_path"; then
+        /bin/rm -f "$tracked_manifest"
+        fail "Tracked installer input must be a regular file: $tracked_path"
+      fi
+      tracked_count=$((tracked_count + 1))
+    done < "$tracked_manifest"
+    if [ "$tracked_count" -eq 0 ]; then
+      /bin/rm -f "$tracked_manifest"
+      fail "No tracked installer files were found."
+    fi
+    /bin/mkdir -p "$temporary"
+    if ! /usr/bin/rsync -a --from0 --files-from="$tracked_manifest" \
+      "$PROJECT_ROOT/" "$temporary/"; then
+      /bin/rm -f "$tracked_manifest"
+      /bin/rm -rf "$temporary"
+      fail "Could not stage tracked installer files."
+    fi
+    /bin/rm -f "$tracked_manifest"
+  else
+    local release_manifest="$PROJECT_ROOT/INSTALL-FILES.txt"
+    local manifest_count=0
+    local unique_count=0
+    [ -f "$release_manifest" ] && [ ! -L "$release_manifest" ] \
+      || fail "Release install manifest is missing or unsafe: $release_manifest"
+    /bin/cp -p "$release_manifest" "$tracked_manifest" \
+      || fail "Could not snapshot the release install manifest."
+    while IFS= read -r tracked_path || [ -n "$tracked_path" ]; do
+      case "$tracked_path" in
+        ''|/*|..|../*|*/../*|release|release/*|runtime|runtime/*)
+          /bin/rm -f "$tracked_manifest"
+          fail "Refusing unsafe release manifest path: $tracked_path"
+          ;;
+      esac
+      if ! installer_input_is_regular "$PROJECT_ROOT" "$tracked_path"; then
+        /bin/rm -f "$tracked_manifest"
+        fail "Release manifest input must be a regular file: $tracked_path"
+      fi
+      manifest_count=$((manifest_count + 1))
+    done < "$tracked_manifest"
+    unique_count="$(LC_ALL=C /usr/bin/sort -u "$tracked_manifest" | /usr/bin/wc -l | /usr/bin/tr -d ' ')"
+    if [ "$manifest_count" -eq 0 ] || [ "$manifest_count" -ne "$unique_count" ] \
+      || [ "$(/usr/bin/grep -Fxc 'INSTALL-FILES.txt' "$tracked_manifest" || true)" -ne 1 ]; then
+      /bin/rm -f "$tracked_manifest"
+      fail "Release install manifest must contain unique files and list itself exactly once."
+    fi
+    /bin/mkdir -p "$temporary"
+    if ! /usr/bin/rsync -a --files-from="$tracked_manifest" \
+      "$PROJECT_ROOT/" "$temporary/"; then
+      /bin/rm -f "$tracked_manifest"
+      /bin/rm -rf "$temporary"
+      fail "Could not stage release manifest files."
+    fi
+    /bin/rm -f "$tracked_manifest"
+  fi
   /bin/chmod 700 "$temporary"/*.command "$temporary"/scripts/*.sh 2>/dev/null || true
   /bin/rm -rf "$previous"
   if [ -e "$INSTALL_ROOT" ]; then /bin/mv "$INSTALL_ROOT" "$previous"; fi

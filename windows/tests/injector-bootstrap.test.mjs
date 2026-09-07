@@ -102,6 +102,12 @@ assert.deepEqual(guarded.context.window.installs, [], "A shell without its sideb
 guarded.markers.sidebar = true;
 guarded.tick();
 assert.deepEqual(guarded.context.window.installs, ["guarded"]);
+guarded.fireDomReady();
+assert.deepEqual(
+  guarded.context.window.installs,
+  ["guarded"],
+  "DOMContentLoaded must not execute a generation that already succeeded through polling.",
+);
 
 const generic = createFixture();
 vm.runInNewContext(earlyPayloadFor('window.installs.push("generic")', "generic"), generic.context);

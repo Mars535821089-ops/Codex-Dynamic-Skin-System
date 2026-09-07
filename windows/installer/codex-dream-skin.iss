@@ -66,6 +66,7 @@ Source: "{#StageRoot}\payload\*"; DestDir: "{tmp}\payload"; Flags: dontcopy noen
 Source: "{#StageRoot}\setup-bootstrap.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageRoot}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageRoot}\NOTICE.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StageRoot}\languages\Inno-Setup-License.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "{#StageRoot}\payload\*"; DestDir: "{app}\payload"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]

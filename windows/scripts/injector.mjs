@@ -1168,6 +1168,7 @@ export function earlyPayloadFor(payload, revision) {
     };
     const install = () => {
       if (window[generationKey] !== generation) { stop(); return true; }
+      if (window[appliedKey] === generation) { stop(); return true; }
       const root = document.documentElement;
       // The shared renderer can install against documentElement before body is
       // committed; requiring body here would create a visible unskinned first
@@ -1484,6 +1485,7 @@ export async function verifySession(
   expectedRevision = null,
   evaluationTimeoutMs = 10000,
   expectedDynamic = false,
+  allowHiddenDocument = false,
 ) {
   const nativeWindow = await inspectTargetWindow(session, targetId, evaluationTimeoutMs);
   return session.evaluate(`(() => {
@@ -1625,6 +1627,9 @@ export async function verifySession(
     const structurePass = l0StructurePass || (l1ScopePass &&
       (Boolean(result.shell?.visible && result.sidebar?.visible) || genericStructurePass));
     const documentPass = result.documentVisibility === 'visible' && !result.documentHidden;
+    const hiddenDocumentAllowed = ${JSON.stringify(allowHiddenDocument)} === true &&
+      result.documentVisibility === 'hidden' && result.documentHidden === true;
+    const documentReady = documentPass || hiddenDocumentAllowed;
     const viewportPass = result.viewport.width >= ${MIN_RENDERER_VIEWPORT_WIDTH} &&
       result.viewport.height >= ${MIN_RENDERER_VIEWPORT_HEIGHT};
     const nativeWindowPass = result.nativeWindow?.pass === true;
@@ -1659,7 +1664,7 @@ export async function verifySession(
     result.expectedDynamic = expectedDynamic;
     result.dynamicPass = dynamicPass;
     result.readiness = {
-      windowPass, documentPass, viewportPass, structurePass,
+      windowPass, documentPass, hiddenDocumentAllowed, viewportPass, structurePass,
       nativeWindowPass, fallbackWindowPass,
     };
     const homePass = !homeScope || (
@@ -1673,7 +1678,7 @@ export async function verifySession(
     );
     result.pass = result.installed && result.version === result.expectedVersion &&
       result.stylePresent && result.businessClassPollution === 0 && windowPass &&
-      documentPass && viewportPass && structurePass &&
+      documentReady && viewportPass && structurePass &&
       payloadPass && dynamicPass && homePass;
     return result;
   })()`, evaluationTimeoutMs);
@@ -1686,6 +1691,7 @@ async function waitForVerifiedSession(
   expectedThemeId = null,
   expectedRevision = null,
   expectedDynamic = false,
+  allowHiddenDocument = false,
 ) {
   const deadline = Date.now() + timeoutMs;
   let lastResult;
@@ -1694,6 +1700,7 @@ async function waitForVerifiedSession(
     try {
       lastResult = await verifySession(
         session, targetId, expectedThemeId, expectedRevision, 10000, expectedDynamic,
+        allowHiddenDocument,
       );
       lastError = null;
       if (lastResult.pass) return lastResult;
@@ -1933,7 +1940,7 @@ async function runOwnedWatch(options) {
     } else {
       let verified = await verifySession(
         session, id, loadedPayload.theme.id, loadedPayload.revision, 2000,
-        expectsVisibleDynamicRoot(loadedPayload),
+        expectsVisibleDynamicRoot(loadedPayload), true,
       ).catch(() => null);
       if (!verified?.pass) {
         await applyToSession(session, loadedPayload.payload);
@@ -1944,6 +1951,7 @@ async function runOwnedWatch(options) {
           loadedPayload.theme.id,
           loadedPayload.revision,
           expectsVisibleDynamicRoot(loadedPayload),
+          true,
         );
       }
       if (!verified?.pass) throw new Error("Recovered theme verification failed");
@@ -2176,6 +2184,7 @@ async function runOwnedWatch(options) {
                 loadedPayload.theme.id,
                 loadedPayload.revision,
                 expectsVisibleDynamicRoot(loadedPayload),
+                true,
               );
               if (!verified?.pass) throw new Error("Live theme update verification failed");
             }
@@ -2229,7 +2238,7 @@ async function runOwnedWatch(options) {
             ? await verifyRemovedSession(session)
             : await verifySession(
               session, id, loadedPayload.theme.id, loadedPayload.revision, 1500,
-              expectsVisibleDynamicRoot(loadedPayload),
+              expectsVisibleDynamicRoot(loadedPayload), true,
             );
           const passed = paused ? verified === true : verified?.pass === true;
           if (!passed) throw new Error("renderer state did not match the active watcher state");
@@ -2309,6 +2318,7 @@ async function runOwnedWatch(options) {
               loadedPayload.theme.id,
               loadedPayload.revision,
               expectsVisibleDynamicRoot(loadedPayload),
+              true,
             );
             if (!verified?.pass) throw new Error("Initial theme verification failed");
           }

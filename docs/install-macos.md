@@ -3,7 +3,7 @@
 ## Requirements
 
 - macOS with the official Codex Desktop application already launched once
-- Node.js 20 or newer for source installation
+- No separate Node.js installation; the installer uses the signed Node.js runtime bundled with the official Codex app
 - A standard user account; `sudo` and administrator access are not required
 
 ## Install from source
@@ -29,6 +29,13 @@ The normal background monitor may repair a missing watcher, but it will not quit
 
 The engine stores user themes under `~/Library/Application Support/CodexDreamSkinStudio` and does not modify `app.asar`.
 
+GitHub source archives and release archives include a checked-in
+`macos/INSTALL-FILES.txt` allowlist. The installer copies only listed regular
+files and rejects stale, duplicate, escaping, or symbolic-link entries. Files
+added beside an extracted download are not copied into the managed engine.
+
+Video background playback is disabled by default to reduce GPU and CPU use while Codex is not active. If you enable it in the theme center, restart the themed Codex session once so the required process capability can take effect. Turning it back off also takes full effect after the next restart.
+
 The installer also registers a per-user background monitor. It restores the
 theme watcher after a crash and prepares a normally launched Codex instance
 for injection. When Codex already has the verified loopback debugging flags,
@@ -51,6 +58,8 @@ To restore the native appearance and remove the installed engine and generated l
 ```
 
 Add `--restart-codex` only when you explicitly want the restore command to close an active themed session and reopen Codex. A successful restore disables automatic reinjection; reinstalling or explicitly enabling the monitor is required before themes can return.
+
+The repository's double-click `macos/Restore Codex Dream Skin.command` launcher is the explicit reopen variant: it passes both `--restore-base-theme` and `--restart-codex`. Use the Terminal command above when Codex must remain closed.
 
 If macOS blocks a downloaded `.command` file, use the Terminal commands above. Do not bypass Gatekeeper for the Codex application itself.
 

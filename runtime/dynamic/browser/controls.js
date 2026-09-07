@@ -38,7 +38,7 @@
         title: "主题中心", subtitle: "集中管理主题、媒体、声音与性能，保存后立即生效", library: "主题库", libraryHint: "选择后保存即可热切换，无需重启 Codex",
         theme: "主题", themeCount: (count) => `${count} 个主题`, current: "当前", playback: "播放与声音",
         searchThemes: "搜索主题", noThemeMatch: "没有匹配的主题", playbackStatus: "视频循环播放",
-        playbackHint: "后台播放默认开启；关闭后切换到其他 App 会暂停画面", display: "显示与性能",
+        playbackHint: "后台播放默认关闭；开启后需重启 Codex，且会增加资源占用", display: "显示与性能",
         displayHint: "根据设备性能调整画质和动效", enabled: "开启声音", backgroundPlayback: "后台播放", backgroundAudio: "切到后台时继续声音", master: "总音量",
         ambient: "环境音量", ui: "提示音量", opacity: "透明度", quality: "播放质量",
         motion: "动效", importMedia: "添加主题", deleteTheme: "删除选中主题",
@@ -55,7 +55,7 @@
         title: "Theme center", subtitle: "Manage themes, media, sound, and performance in one place", library: "Theme library", libraryHint: "Save to hot-switch without restarting Codex",
         theme: "Theme", themeCount: (count) => `${count} themes`, current: "Current", playback: "Playback & sound",
         searchThemes: "Search themes", noThemeMatch: "No matching themes", playbackStatus: "Video loops continuously",
-        playbackHint: "Background playback is on by default; turn it off to pause when another app is active", display: "Display & performance",
+        playbackHint: "Background playback is off by default; enabling it requires a Codex restart and uses more resources", display: "Display & performance",
         displayHint: "Tune quality and motion for this device", enabled: "Enable sound", backgroundPlayback: "Background playback", backgroundAudio: "Keep audio playing in background", master: "Master volume",
         ambient: "Ambient volume", ui: "UI volume", opacity: "Opacity", quality: "Playback quality",
         motion: "Motion", importMedia: "Add theme", deleteTheme: "Delete selected theme",
@@ -330,7 +330,7 @@
           ? (zh ? "后台播放已开启" : "Background playback on")
           : (zh ? "切出应用时暂停" : "Pauses outside the app")}`;
       };
-      updatePlaybackStatus(settings.backgroundPlayback !== false);
+      updatePlaybackStatus(settings.backgroundPlayback === true);
       Object.assign(playbackStatus.style, { margin: "0 0 8px", padding: "9px 11px", borderRadius: "9px",
         background: "rgba(72,155,218,.1)", border: "1px solid rgba(105,183,239,.18)",
         color: "rgba(195,229,255,.88)", fontSize: "12px" });
@@ -352,7 +352,7 @@
       const backgroundPlaybackLabel = row(text.backgroundPlayback);
       const backgroundPlayback = document.createElement("input");
       backgroundPlayback.type = "checkbox";
-      backgroundPlayback.checked = settings.backgroundPlayback !== false;
+      backgroundPlayback.checked = settings.backgroundPlayback === true;
       backgroundPlayback.style.accentColor = "#62b9ff";
       backgroundPlayback.setAttribute("data-setting", "backgroundPlayback");
       backgroundPlayback.setAttribute("aria-label", text.backgroundPlayback);
@@ -524,7 +524,7 @@
             if (settingValues.has(key)) settingValues.get(key).textContent = `${Math.round(Number(draft[key]) * 100)}%`;
           }
         }
-        renderThemeSelection(); syncSoundControls(); updatePlaybackStatus(draft.backgroundPlayback !== false);
+        renderThemeSelection(); syncSoundControls(); updatePlaybackStatus(draft.backgroundPlayback === true);
         deleteConfirmation.style.display = "none"; save.disabled = true;
         saveState.textContent = text.saved; saveState.setAttribute("data-state", "saved");
         saveState.style.color = "rgba(255,255,255,.46)";
@@ -541,7 +541,7 @@
         const mediaLayer = modules.get("media-layer");
         mediaLayer?.setOpacity?.(settings.visualOpacity ?? 1);
         mediaLayer?.setReducedMotion?.(settings.reducedMotion);
-        mediaLayer?.setBackgroundPlayback?.(settings.backgroundPlayback !== false);
+        mediaLayer?.setBackgroundPlayback?.(settings.backgroundPlayback === true);
         modules.get("performance-policy")?.setPreference?.(settings.quality, settings.reducedMotion);
         try { window.localStorage?.setItem(storageKey, JSON.stringify(settings)); } catch {}
         window.dispatchEvent(new window.CustomEvent("codex-dynamic-skin-settings-change", {
@@ -551,7 +551,7 @@
       audioBus?.setSettings?.(settings);
       modules.get("media-layer")?.setOpacity?.(settings.visualOpacity ?? 1);
       modules.get("media-layer")?.setReducedMotion?.(settings.reducedMotion);
-      modules.get("media-layer")?.setBackgroundPlayback?.(settings.backgroundPlayback !== false);
+      modules.get("media-layer")?.setBackgroundPlayback?.(settings.backgroundPlayback === true);
       modules.get("performance-policy")?.setPreference?.(settings.quality, settings.reducedMotion);
       cancel.onclick = closePanel;
       save.onclick = async (event) => {

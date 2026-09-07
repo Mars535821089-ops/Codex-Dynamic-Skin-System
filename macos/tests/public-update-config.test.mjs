@@ -51,6 +51,23 @@ test("public update check uses configured repository and semantic version orderi
     env: { ...process.env, CODEX_DREAM_SKIN_TEST_RESPONSE_FILE: response },
   });
   assert.equal(JSON.parse(older.stdout).updateAvailable, false);
+
+  await fs.writeFile(response, JSON.stringify({ tag_name: "v01.2.3" }) + "\n");
+  await assert.rejects(
+    execFileAsync("/bin/bash", [path.join(root, "scripts/check-update-macos.sh"), "--json"], {
+      env: { ...process.env, CODEX_DREAM_SKIN_TEST_RESPONSE_FILE: response },
+    }),
+    (error) => error.code === 1 && /unsupported release tag/i.test(error.stderr),
+  );
+
+  await fs.writeFile(response,
+    JSON.stringify({ tag_name: "v999999999999999999999999.0.0" }) + "\n");
+  const huge = await execFileAsync("/bin/bash", [
+    path.join(root, "scripts/check-update-macos.sh"), "--json",
+  ], {
+    env: { ...process.env, CODEX_DREAM_SKIN_TEST_RESPONSE_FILE: response },
+  });
+  assert.equal(JSON.parse(huge.stdout).updateAvailable, true);
 });
 
 test("public update check stays disabled before an owner configures the repository", async (t) => {

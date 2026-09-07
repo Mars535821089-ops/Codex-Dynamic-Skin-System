@@ -230,9 +230,25 @@
       let appFocused = typeof document.hasFocus === "function" ? document.hasFocus() : true;
       let tier = "media";
       let reduced = prefersReducedMotion(settings, window);
-      let backgroundPlayback = settings?.backgroundPlayback !== false;
+      let backgroundPlayback = settings?.backgroundPlayback === true;
       let presentationEpoch = 0;
       let videoPresentationLive = false;
+
+      // React does not own this body sibling, but renderer upgrades and other
+      // injectors can still remove it. Repair an active generation in the same
+      // mutation turn instead of waiting for the controller health poll.
+      const rootObserver = typeof MutationObserver === "function" && document.body
+        ? new MutationObserver(() => {
+          if (destroyed || !committed || !revealed || root.parentNode === document.body) return;
+          if (typeof document.body.prepend === "function") document.body.prepend(root);
+          else document.body.append(root);
+          syncVideoLiveMarker();
+        })
+        : null;
+      rootObserver?.observe(document.body, { childList: true });
+      const disconnectRootObserver = () => rootObserver?.disconnect();
+      localDisposers.push(disconnectRootObserver);
+      ledger.track("listener", disconnectRootObserver);
 
       function canPlayVideo() {
         return Boolean(video && committed && !destroyed && !reduced && tier !== "static");
@@ -306,9 +322,11 @@
       }
 
       function resumeFromBackground() {
-        if (!canPlayVideo() || document.hidden || !appFocused || !playingBeforeBackground) return;
+        if (!canPlayVideo() || document.hidden || !appFocused) return;
+        if (!playingBeforeBackground && videoPresentationLive) return;
         playingBeforeBackground = false;
-        video.play().catch(() => {});
+        if (videoPresentationLive) video.play().catch(() => {});
+        else resumeVideoFromPoster();
       }
 
       function decodedFrames() {
@@ -374,9 +392,18 @@
 
       async function waitForVideo() {
         if (!video || reduced) return;
+        // A background Electron renderer may suspend the entire media loading
+        // pipeline, including loadedmetadata. The decoded poster is sufficient
+        // for an atomic hidden-window commit; foreground focus resumes video.
+        if (document.hidden || !appFocused) return;
         if (video.readyState < 1) {
           await once(video, ["loadedmetadata"], ["error", "abort"], 10_000, localDisposers);
         }
+        // Chromium can suspend requestVideoFrameCallback indefinitely for a
+        // hidden or unfocused renderer. The poster is already decoded in
+        // parallel, so complete the background handoff now and decode the
+        // moving presentation when the window returns to the foreground.
+        if (document.hidden || !appFocused) return;
         if (typeof video.requestVideoFrameCallback === "function") {
           await new Promise((resolve, reject) => {
             let settled = false;
@@ -404,6 +431,11 @@
         } else if (video.readyState < 3) {
           await once(video, ["canplay"], ["error", "abort"], 10_000, localDisposers);
         }
+      }
+
+      async function waitForPoster() {
+        if (!poster?.decode || document.hidden || !appFocused) return;
+        await poster.decode();
       }
 
       const api = {
@@ -434,7 +466,7 @@
           if (destroyed) throw new MediaLayerError("DESTROYED", "Dynamic skin media layer was destroyed.");
           try {
             if (reduced) {
-              if (poster?.decode) await poster.decode();
+              await waitForPoster();
               if (video) video.style.display = "none";
               phase = "ready";
               return;
@@ -442,7 +474,7 @@
             // Attach video readiness/error listeners before waiting for poster
             // decoding so an immediately available media event cannot be lost.
             await Promise.all([
-              poster?.decode ? poster.decode() : Promise.resolve(),
+              waitForPoster(),
               waitForVideo(),
             ]);
             phase = "ready";

@@ -26,7 +26,7 @@ async function temporaryDirectory(t) {
 
 const expectedDefaults = {
   schemaVersion: 1,
-  backgroundPlayback: true,
+  backgroundPlayback: false,
   soundEnabled: false,
   masterVolume: 1,
   ambientVolume: 0.7,
@@ -45,6 +45,18 @@ test("defaults keep sound disabled and are deeply frozen", () => {
   assert.deepEqual(DEFAULT_DYNAMIC_SETTINGS, expectedDefaults);
   assert.equal(Object.isFrozen(DEFAULT_DYNAMIC_SETTINGS), true);
   assert.throws(() => { DEFAULT_DYNAMIC_SETTINGS.soundEnabled = true; }, TypeError);
+});
+
+test("browser modules treat a missing background playback field as disabled", async () => {
+  const browserRoot = new URL("../../runtime/dynamic/browser/", import.meta.url);
+  const controls = await fs.readFile(new URL("controls.js", browserRoot), "utf8");
+  const mediaLayer = await fs.readFile(new URL("media-layer.js", browserRoot), "utf8");
+
+  assert.match(controls, /settings\.backgroundPlayback === true/);
+  assert.doesNotMatch(controls, /settings\.backgroundPlayback !== false/);
+  assert.match(mediaLayer, /settings\?\.backgroundPlayback === true/);
+  assert.doesNotMatch(mediaLayer, /settings\?\.backgroundPlayback !== false/);
+  assert.match(controls, /后台播放默认关闭/);
 });
 
 test("validates every supported user-controlled mode without mutating input", () => {
@@ -179,7 +191,7 @@ test("serializes validated settings in deterministic contract order", () => {
   const { serializeDynamicSettings } = requireSettings();
   const shuffled = {
     hiddenAudio: "pause",
-    backgroundPlayback: true,
+    backgroundPlayback: false,
     uiMuted: false,
     schemaVersion: 1,
     quality: "auto",

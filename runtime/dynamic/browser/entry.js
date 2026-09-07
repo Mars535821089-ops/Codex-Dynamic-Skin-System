@@ -5,6 +5,7 @@
   const NATIVE_ACTIVATION_TOKEN_KEY = "__codexDynamicSkinNativeActivationToken";
   const BASE_CLEANUP_KEY = "__codexDynamicSkinBaseCleanup";
   const ACTIVATION_TOKEN_KEY = "__codexDynamicSkinActivationToken";
+  const PENDING_ACTIVATION_KEY = "__codexDynamicSkinPendingActivation";
   const LAST_ERROR_KEY = "__CODEX_DYNAMIC_SKIN_LAST_ERROR__";
   const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 
@@ -298,6 +299,9 @@
     if (reusableDynamicState(rootState.dynamic, config)) {
       return Promise.resolve(rootState.dynamic);
     }
+    const pendingIdentity = `${config.displayMode ?? "theme"}\0${config.activation}\0${config.generation}`;
+    const pending = globalThis[PENDING_ACTIVATION_KEY];
+    if (pending?.identity === pendingIdentity && pending.promise) return pending.promise;
     // Theme media staging is asynchronous. A slower, older video can finish
     // after a newer request has already committed; without an ownership token
     // that stale activation would reveal itself and overwrite the new theme.
@@ -444,7 +448,7 @@
       }
       return dynamicState;
     };
-    return activate().catch(async (error) => {
+    const activationPromise = activate().catch(async (error) => {
       if (rootState[ACTIVATION_TOKEN_KEY] !== activationToken) {
         try { await dynamicState.cleanup(); } catch {}
         return rootState.dynamic;
@@ -461,5 +465,16 @@
       recordFailure(error);
       throw error;
     });
+    globalThis[PENDING_ACTIVATION_KEY] = Object.freeze({
+      identity: pendingIdentity,
+      promise: activationPromise,
+    });
+    const clearPending = () => {
+      if (globalThis[PENDING_ACTIVATION_KEY]?.promise === activationPromise) {
+        delete globalThis[PENDING_ACTIVATION_KEY];
+      }
+    };
+    activationPromise.then(clearPending, clearPending);
+    return activationPromise;
   };
 })();

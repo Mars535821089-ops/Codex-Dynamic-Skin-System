@@ -8,10 +8,6 @@ import { fileURLToPath } from "node:url";
 
 const REQUIRED_FLAGS = [
   "--remote-debugging-address=127.0.0.1",
-  "--disable-background-media-suspend",
-  "--disable-backgrounding-occluded-windows",
-  "--disable-background-timer-throttling",
-  "--disable-renderer-backgrounding",
 ];
 const PORT_FLAG = /(?:^|\s)--remote-debugging-port=(\d{4,5})(?=\s|$)/u;
 const ISOLATED_PROFILE_FLAG = /(?:^|\s)--user-data-dir(?:=|\s)/u;
@@ -92,10 +88,12 @@ export function decideAutostartAction(
     return { action: "wait", reason: "restart-not-authorized" };
   }
   const attemptAge = Number.isFinite(state?.lastAttemptAt) ? now - state.lastAttemptAt : Infinity;
-  if (state?.lastAttemptPid === pid && state?.lastResult === "running" && attemptAge < cooldownMs) {
+  const sameProcessRun = state?.observedStopped !== true;
+  if (sameProcessRun && state?.lastAttemptPid === pid
+      && state?.lastResult === "running" && attemptAge < cooldownMs) {
     return { action: "wait", reason: "attempted-pid" };
   }
-  if (Number.isFinite(state?.lastAttemptAt) && attemptAge < cooldownMs) {
+  if (sameProcessRun && Number.isFinite(state?.lastAttemptAt) && attemptAge < cooldownMs) {
     return { action: "wait", reason: "cooldown" };
   }
   return { action: repairWatcher ? "repair-watcher" : "restart", pid };

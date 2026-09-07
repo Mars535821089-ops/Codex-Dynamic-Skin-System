@@ -10,7 +10,21 @@ REPO_ROOT="$(/usr/bin/git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null)" || 
   /usr/bin/printf 'Unexpected release source directory: %s\n' "$ROOT" >&2
   exit 1
 }
-VERSION="$(/usr/bin/tr -d '[:space:]' < "$ROOT/VERSION")"
+NODE="$(command -v node)" || {
+  /usr/bin/printf 'Node.js is required to verify the public release boundary.\n' >&2
+  exit 1
+}
+VERSION="$(/usr/bin/tr -d '\r\n' < "$ROOT/VERSION")"
+if ! [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+  /usr/bin/printf 'macos/VERSION must contain a three-part semantic version: %s\n' "$VERSION" >&2
+  exit 1
+fi
+"$NODE" "$REPO_ROOT/tools/verify-release-versions.mjs" --root "$REPO_ROOT" >/dev/null
+# These are release-integrity gates, not optional regression tests. Keep them
+# active even for --skip-tests so a manual build cannot package tracked private
+# content or stale generated runtime assets.
+"$NODE" "$REPO_ROOT/tools/verify-public-boundary.mjs" --root "$REPO_ROOT" >/dev/null
+"$NODE" "$REPO_ROOT/tools/sync-runtime-assets.mjs" --check >/dev/null
 RELEASE_DIR="$ROOT/release"
 ARCHIVE="$RELEASE_DIR/codex-dynamic-skin-system-v$VERSION.zip"
 TMP="$(/usr/bin/mktemp -d /tmp/codex-dynamic-skin-release.XXXXXX)"
@@ -42,11 +56,31 @@ done < <(/usr/bin/git -C "$REPO_ROOT" ls-files -z -- macos)
   /usr/bin/printf 'No tracked macOS release files were found.\n' >&2
   exit 1
 }
+INSTALL_MANIFEST_TMP="$TMP/INSTALL-FILES.txt"
+(
+  cd "$TMP/codex-dynamic-skin-system"
+  {
+    /usr/bin/find . -type f ! -name 'INSTALL-FILES.txt' -print \
+      | /usr/bin/sed 's#^\./##'
+    /usr/bin/printf 'INSTALL-FILES.txt\n'
+  } | LC_ALL=C /usr/bin/sort > "$INSTALL_MANIFEST_TMP"
+)
+if ! /usr/bin/cmp -s "$INSTALL_MANIFEST_TMP" \
+  "$TMP/codex-dynamic-skin-system/INSTALL-FILES.txt"; then
+  /usr/bin/printf 'macOS install file manifest is stale; update macos/INSTALL-FILES.txt.\n' >&2
+  exit 1
+fi
+/bin/rm -f "$INSTALL_MANIFEST_TMP"
 /usr/bin/find "$TMP/codex-dynamic-skin-system" -type f \
   \( -name '.DS_Store' -o -name '._*' \) -delete
 /bin/chmod 755 "$TMP/codex-dynamic-skin-system"/*.command
 /bin/chmod 755 "$TMP/codex-dynamic-skin-system"/scripts/*.sh \
   "$TMP/codex-dynamic-skin-system"/tests/*.sh
+# ZIP stores filesystem mtimes, including freshly-created directory mtimes. Use
+# one fixed, ZIP-safe timestamp so identical tracked bytes produce identical
+# release bytes across checkouts that only differ in filesystem mtimes.
+/usr/bin/find "$TMP/codex-dynamic-skin-system" -depth -exec \
+  /usr/bin/touch -h -t 200001010000 {} +
 /bin/rm -f "$ARCHIVE"
 COPYFILE_DISABLE=1 /usr/bin/ditto -c -k --keepParent --norsrc --noextattr \
   "$TMP/codex-dynamic-skin-system" "$ARCHIVE"

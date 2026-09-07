@@ -177,7 +177,7 @@ function makeSession({
   };
 }
 
-async function verify(overrides = {}, expectedDynamic = false) {
+async function verify(overrides = {}, expectedDynamic = false, allowHiddenDocument = false) {
   const session = makeSession(overrides);
   const result = await verifySession(
     session,
@@ -186,6 +186,7 @@ async function verify(overrides = {}, expectedDynamic = false) {
     "fixture-revision",
     10000,
     expectedDynamic,
+    allowHiddenDocument,
   );
   return { result, session };
 }
@@ -237,6 +238,7 @@ test("normal L1 renderer requires and records the exact target window binding", 
   assert.deepEqual({ ...result.readiness }, {
     windowPass: true,
     documentPass: true,
+    hiddenDocumentAllowed: false,
     viewportPass: true,
     structurePass: true,
     nativeWindowPass: true,
@@ -499,6 +501,16 @@ test("hidden documents and unreasonable viewports cannot pass", async () => {
   assert.equal(hidden.result.pass, false);
   assert.equal(hidden.result.readiness.documentPass, false);
 
+  const hiddenOperational = await verify(
+    { dom: makeDomFixture({ visibilityState: "hidden", hidden: true }) },
+    false,
+    true,
+  );
+  assert.equal(hiddenOperational.result.pass, true,
+    "The background watcher may verify a healthy hidden renderer without forcing it visible.");
+  assert.equal(hiddenOperational.result.readiness.documentPass, false);
+  assert.equal(hiddenOperational.result.readiness.hiddenDocumentAllowed, true);
+
   const tiny = await verify({
     dom: makeDomFixture({ viewportWidth: 319, viewportHeight: 239 }),
   });
@@ -543,14 +555,25 @@ test("start cannot announce active after renderer verification exhausts its dead
     "Verification failure must clear transient state and rethrow before the active message.");
 });
 
-test("foreground and background Windows watchers advertise the same playback capability", async () => {
+test("Windows launch flags and watcher capability require explicit background playback opt-in", async () => {
   const source = await fs.readFile(startPath, "utf8");
+  const launchStart = source.indexOf("$arguments = @(");
+  const launchEnd = source.indexOf("if ($ProfilePath)", launchStart);
+  const launchBlock = source.slice(launchStart, launchEnd);
+  assert.match(launchBlock, /--remote-debugging-address=127\.0\.0\.1/);
+  assert.match(launchBlock, /--remote-debugging-port=\$Port/);
+  assert.match(launchBlock, /if \(Test-DreamSkinBackgroundPlaybackEnabled -StateRoot \$StateRoot\)/);
+  assert.match(launchBlock, /--disable-background-media-suspend/);
+  assert.match(launchBlock, /--disable-backgrounding-occluded-windows/);
+  assert.match(launchBlock, /--disable-background-timer-throttling/);
+  assert.match(launchBlock, /--disable-renderer-backgrounding/);
+
   const foregroundStart = source.indexOf("if ($ForegroundInjector)");
   const foregroundEnd = source.indexOf("$state = $null", foregroundStart);
   const backgroundStart = source.indexOf("$injectorArgs = @(", foregroundEnd);
   const backgroundEnd = source.indexOf("$daemon = Start-Process", backgroundStart);
-  assert.match(source.slice(foregroundStart, foregroundEnd), /--background-playback-capable/);
-  assert.match(source.slice(backgroundStart, backgroundEnd), /'--background-playback-capable'/);
+  assert.match(source.slice(foregroundStart, foregroundEnd), /if \(\$backgroundPlaybackCapable\)[\s\S]*?--background-playback-capable/);
+  assert.match(source.slice(backgroundStart, backgroundEnd), /if \(\$backgroundPlaybackCapable\)[\s\S]*?'--background-playback-capable'/);
 });
 
 test("watcher startup verification never launches a competing one-shot writer", async () => {

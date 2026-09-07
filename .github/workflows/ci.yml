@@ -24,6 +24,10 @@ jobs:
         run: node tools/verify-public-boundary.mjs --root .
       - name: Verify generated runtime assets
         run: node tools/sync-runtime-assets.mjs --check
+      - name: Verify release version consistency
+        run: node tools/verify-release-versions.mjs --root .
+      - name: Verify Windows native CI chain
+        run: node tools/verify-windows-native-ci.mjs --root .
       - name: Check JavaScript syntax
         shell: bash
         run: |

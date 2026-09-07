@@ -76,8 +76,15 @@ test("Windows injector accepts the isolated runner background capability contrac
   assert.match(source, /backgroundPlaybackSupport/);
 });
 
-test("Windows launcher enables real background media playback at process start", async () => {
-  const source = await fs.readFile(path.join(projectRoot, "windows", "scripts", "start-dream-skin.ps1"), "utf8");
+test("Windows launcher enables background media playback only after explicit opt-in", async () => {
+  const startSource = await fs.readFile(path.join(projectRoot, "windows", "scripts", "start-dream-skin.ps1"), "utf8");
+  const commonSource = await fs.readFile(path.join(projectRoot, "windows", "scripts", "common-windows.ps1"), "utf8");
+
+  assert.match(startSource, /Test-DreamSkinBackgroundPlaybackEnabled\s+-StateRoot\s+\$StateRoot/);
+  assert.match(commonSource, /function Test-DreamSkinBackgroundPlaybackEnabled/);
+  assert.match(commonSource, /backgroundPlayback\s+-is\s+\[bool\][\s\S]*\[bool\]\$settings\.backgroundPlayback/);
+  assert.match(commonSource, /catch\s*\{\s*return \$false\s*\}/);
+  assert.match(startSource, /Test-DreamSkinBackgroundPlaybackCapable[\s\S]*if \(\$backgroundPlaybackCapable\) \{ \$injectorArgs \+= '--background-playback-capable' \}/);
   for (const flag of [
     "--disable-background-media-suspend",
     "--disable-backgrounding-occluded-windows",
@@ -85,6 +92,6 @@ test("Windows launcher enables real background media playback at process start",
     "--disable-renderer-backgrounding",
     "--background-playback-capable",
   ]) {
-    assert.ok(source.includes(flag), `missing Windows background playback launch contract: ${flag}`);
+    assert.ok(startSource.includes(flag), `missing Windows background playback launch contract: ${flag}`);
   }
 });

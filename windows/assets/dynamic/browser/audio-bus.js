@@ -6,6 +6,7 @@
     constructor(code, message) { super(message); this.name = "AudioBusError"; this.code = code; }
   }
   const clamp = (value) => Math.min(1, Math.max(0, Number.isFinite(value) ? value : 0));
+  const UI_CLIP_FETCH_TIMEOUT_MS = 5000;
 
   register("audio-bus", ({ document, window }) => ({
     create({ config, modules, ledger, now = () => Date.now() }) {
@@ -72,6 +73,35 @@
         if (ambientElement) ambientElement.muted = !ambientAudible;
       }
 
+      async function decodeUiClip(assetUrl, eventName) {
+        const controller = new window.AbortController();
+        let timeout = null;
+        const deadline = new Promise((_resolve, reject) => {
+          timeout = window.setTimeout(() => {
+            controller.abort();
+            reject(new AudioBusError("AUDIO_TIMEOUT",
+              `Dynamic skin UI audio timed out: ${eventName}`));
+          }, UI_CLIP_FETCH_TIMEOUT_MS);
+        });
+        try {
+          return await Promise.race([
+            (async () => {
+              const response = await window.fetch(assetUrl, {
+                cache: "no-store", credentials: "omit", signal: controller.signal,
+              });
+              if (!response?.ok) {
+                throw new AudioBusError("AUDIO_FETCH",
+                  `Dynamic skin UI audio could not be loaded: ${eventName}`);
+              }
+              return await context.decodeAudioData(await response.arrayBuffer());
+            })(),
+            deadline,
+          ]);
+        } finally {
+          window.clearTimeout(timeout);
+        }
+      }
+
       async function prepareUiClips() {
         let failures = 0;
         for (const [eventName, assetPath] of Object.entries(uiConfig.events)) {
@@ -83,9 +113,7 @@
           // disables video audio, the analyser, or the first-party voxel response.
           if (assetUrl.startsWith("blob:")) { mediaClips.set(eventName, assetUrl); continue; }
           try {
-            const response = await window.fetch(assetUrl, { cache: "no-store", credentials: "omit" });
-            if (!response?.ok) throw new AudioBusError("AUDIO_FETCH", `Dynamic skin UI audio could not be loaded: ${eventName}`);
-            decodedClips.set(eventName, await context.decodeAudioData(await response.arrayBuffer()));
+            decodedClips.set(eventName, await decodeUiClip(assetUrl, eventName));
           } catch {
             failures += 1;
           }
