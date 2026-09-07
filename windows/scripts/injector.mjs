@@ -1100,7 +1100,7 @@ export async function inspectTargetWindow(session, targetId, timeoutMs = 10000) 
 async function connectCodexTargets(port, timeoutMs, expectedBrowserId) {
   const deadline = Date.now() + timeoutMs;
   let lastError;
-  while (Date.now() < deadline) {
+  do {
     try {
       const targets = await listAppTargets(port, expectedBrowserId);
       const connected = [];
@@ -1128,7 +1128,7 @@ async function connectCodexTargets(port, timeoutMs, expectedBrowserId) {
       lastError = error;
     }
     await new Promise((resolve) => setTimeout(resolve, 350));
-  }
+  } while (Date.now() < deadline);
   throw new Error(`No verified Codex renderer on 127.0.0.1:${port}: ${lastError?.message ?? "timed out"}`);
 }
 

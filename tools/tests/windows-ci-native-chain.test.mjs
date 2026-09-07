@@ -23,6 +23,9 @@ jobs:
 `;
 
 const validRunner = `
+$tests = Get-ChildItem -LiteralPath (Join-Path $root 'windows/tests') -Filter '*.test.mjs' -File
+& node --test @($tests.FullName)
+if ($LASTEXITCODE -ne 0) { throw "Windows JavaScript tests failed" }
 & node (Join-Path $root 'windows/tests/native-suite-runner.mjs') \\
   '--shell' $powerShellPath \\
   '--tests-dir' (Join-Path $root 'windows/tests') \\
@@ -73,6 +76,17 @@ test("Windows CI contract rejects an entrypoint that no longer runs native suite
   const root = createFixture({ runner: "& node --test $tests\n" });
   try {
     assert.throws(() => verifyWindowsNativeCiChain(root), /native-suite-runner\.mjs/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Windows CI contract rejects platform-foreign macOS test discovery", () => {
+  const root = createFixture({
+    runner: validRunner.replace("windows/tests') -Filter", "macos/tests') -Filter")
+  });
+  try {
+    assert.throws(() => verifyWindowsNativeCiChain(root), /Windows JavaScript tests/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

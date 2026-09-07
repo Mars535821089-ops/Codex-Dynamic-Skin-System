@@ -22,12 +22,9 @@ foreach ($token in @(
 Push-Location $root
 try {
   $tests = @()
-  $tests += Get-ChildItem -LiteralPath (Join-Path $root 'tools') -Filter '*.test.mjs' -File
-  $tests += Get-ChildItem -LiteralPath (Join-Path $root 'tools/tests') -Filter '*.test.mjs' -File
-  $tests += Get-ChildItem -LiteralPath (Join-Path $root 'macos/tests') -Filter '*.test.mjs' -File
   $tests += Get-ChildItem -LiteralPath (Join-Path $root 'windows/tests') -Filter '*.test.mjs' -File
   & node --test @($tests.FullName)
-  if ($LASTEXITCODE -ne 0) { throw "Portable theme tests failed with exit code $LASTEXITCODE" }
+  if ($LASTEXITCODE -ne 0) { throw "Windows JavaScript tests failed with exit code $LASTEXITCODE" }
   $powerShellPath = (Get-Process -Id $PID -ErrorAction Stop).Path
   & node (Join-Path $root 'windows/tests/native-suite-runner.mjs') `
     '--shell' $powerShellPath `

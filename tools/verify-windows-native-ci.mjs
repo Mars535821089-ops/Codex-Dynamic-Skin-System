@@ -49,6 +49,10 @@ export function verifyWindowsNativeCiChain(rootDirectory) {
   if (!/node[\s\S]*?windows\/tests\/native-suite-runner\.mjs/.test(entrypoint)) {
     throw new Error("windows/tests/run-tests.ps1 must invoke native-suite-runner.mjs");
   }
+  if (!/Get-ChildItem[\s\S]*?windows\/tests[\s\S]*?\*\.test\.mjs/.test(entrypoint)
+      || /Get-ChildItem[^\n]*macos\/tests[^\n]*\*\.test\.mjs/.test(entrypoint)) {
+    throw new Error("windows/tests/run-tests.ps1 must run Windows JavaScript tests without platform-foreign macOS tests");
+  }
   if (!/\$LASTEXITCODE\s+-ne\s+0[\s\S]*?throw/.test(entrypoint)) {
     throw new Error("windows/tests/run-tests.ps1 must fail when the native suite runner fails");
   }
