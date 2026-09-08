@@ -46,8 +46,14 @@ test("submitted KeepAlive start jobs are recognized through direct and shell-wra
 
   assert.equal(parserStatus(direct), 0);
   assert.equal(parserStatus(wrapped), 0);
-  const homeRelativeStart = `$HOME${startPath.slice(process.env.HOME.length)}`;
-  assert.equal(parserStatus(wrapped.replace(`\"${startPath}\"`, `\"${homeRelativeStart}\"`)), 0);
+  const expectedHomeStart = path.join(
+    process.env.HOME, ".codex-dream-skin-test", "start-dream-skin-macos.sh",
+  );
+  const homeRelativeStart = `$HOME${expectedHomeStart.slice(process.env.HOME.length)}`;
+  assert.equal(
+    parserStatus(wrapped.replace(`\"${startPath}\"`, `\"${homeRelativeStart}\"`), expectedHomeStart),
+    0,
+  );
   const installedStart = "/tmp/codex-dream-skin-studio/scripts/start-dream-skin-macos.sh";
   assert.equal(
     parserStatus(wrapped.replace(`\"${startPath}\"`, installedStart), installedStart),
