@@ -183,6 +183,29 @@ test("a fresh plain Codex launch receives a full startup grace period", () => {
   );
 });
 
+test("the default startup grace corrects an authorized plain launch after ten seconds", () => {
+  const plain = snapshot({
+    compliantPids: [],
+    plainPids: [42],
+    watcherState: "unhealthy",
+    appStartedAtMs: now - 9_999,
+  });
+  assert.deepEqual(
+    decideAutostartAction(plain, null, now, cooldown, { allowCodexRestart: true }),
+    { action: "wait", reason: "launch-grace" },
+  );
+  assert.deepEqual(
+    decideAutostartAction(
+      { ...plain, appStartedAtMs: now - 10_001 },
+      null,
+      now,
+      cooldown,
+      { allowCodexRestart: true },
+    ),
+    { action: "restart", pid: 42 },
+  );
+});
+
 test("a full restart is latched until health or a real stop starts a new fault cycle", () => {
   const plain = snapshot({ compliantPids: [], plainPids: [42], watcherState: "unhealthy" });
   const latched = {

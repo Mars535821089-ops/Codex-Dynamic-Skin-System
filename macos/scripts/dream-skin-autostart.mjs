@@ -12,7 +12,7 @@ const REQUIRED_FLAGS = [
 const PORT_FLAG = /(?:^|\s)--remote-debugging-port=(\d{4,5})(?=\s|$)/u;
 const ISOLATED_PROFILE_FLAG = /(?:^|\s)--user-data-dir(?:=|\s)/u;
 const DEFAULT_COOLDOWN_MS = 5 * 60 * 1000;
-const DEFAULT_LAUNCH_GRACE_MS = 60 * 1000;
+const DEFAULT_LAUNCH_GRACE_MS = 10 * 1000;
 const MAX_SESSION_TAIL_BYTES = 16 * 1024 * 1024;
 const SESSION_CLOCK_TOLERANCE_MS = 2_000;
 const ACTIVE_EVENT = "task_started";
