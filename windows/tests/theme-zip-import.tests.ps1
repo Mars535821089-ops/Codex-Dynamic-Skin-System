@@ -471,6 +471,29 @@ function Assert-TestExpansionRejectedWithoutWrites {
 }
 
 try {
+  # This theme suite never replaces the Node binary. Validate it through the
+  # real production resolver once, then reuse that trusted runtime only for
+  # this test process. Every ZIP, image, payload and CSS validator still runs.
+  # Production callers keep their original per-call signature/identity checks;
+  # this fixture is not evidence that those repeated checks are inexpensive.
+  $script:ZipTestOriginalNodeRuntimeResolver = (Get-Command Get-DreamSkinNodeRuntime).ScriptBlock
+  $script:ZipTestNodeRuntime = $null
+  $script:ZipTestNodeRuntimeRequests = 0
+  $script:ZipTestNodeRuntimeValidations = 0
+  function Get-DreamSkinNodeRuntime {
+    param([int]$MinimumMajor = 22)
+    $script:ZipTestNodeRuntimeRequests += 1
+    if ($null -eq $script:ZipTestNodeRuntime) {
+      $script:ZipTestNodeRuntimeValidations += 1
+      $script:ZipTestNodeRuntime = & $script:ZipTestOriginalNodeRuntimeResolver -MinimumMajor $MinimumMajor
+      Write-Host 'ZIP runtime: production signature, version and executable identity validated.'
+    }
+    if ([int]$script:ZipTestNodeRuntime.Major -lt $MinimumMajor) {
+      throw "The test runtime does not satisfy Node.js $MinimumMajor or newer."
+    }
+    return $script:ZipTestNodeRuntime
+  }
+
   $stateRoot = Join-Path $temporaryRoot 'state'
   $paths = Initialize-DreamSkinThemeStore -SkillRoot $Root -StateRoot $stateRoot
   $activeBefore = Get-DreamSkinThemeSemanticFingerprint -ThemeDirectory $paths.Active
@@ -1536,7 +1559,18 @@ try {
   if ($transactionResidue.Count -gt 0) {
     throw 'A successful or rolled-back import left hidden transaction directories.'
   }
+  if ($script:ZipTestNodeRuntimeValidations -ne 1 -or $script:ZipTestNodeRuntimeRequests -le 1) {
+    throw 'The ZIP suite must validate the real Node runtime exactly once and reuse it across validators.'
+  }
   Write-Host 'PASS: Windows ZIP import is contained, bounded, atomic, deduplicated, and active-theme neutral.'
 } finally {
-  Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
+  try {
+    Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
+  } finally {
+    if ($null -ne $script:ZipTestOriginalNodeRuntimeResolver) {
+      Set-Item Function:\Get-DreamSkinNodeRuntime -Value $script:ZipTestOriginalNodeRuntimeResolver
+      Write-Host ("ZIP runtime summary: {0} requests, {1} production trust validation(s); all validators unchanged." -f `
+        $script:ZipTestNodeRuntimeRequests, $script:ZipTestNodeRuntimeValidations)
+    }
+  }
 }

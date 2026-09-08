@@ -1,8 +1,9 @@
 [CmdletBinding()]
 param([Parameter(Mandatory = $true)][string]$Root)
 
-# All operating-system calls are mocked. Native argv decoding is additionally
-# exercised on Windows; no installed app or real process is modified.
+# App/process/signature boundaries are mocked; Node trust file checks use only
+# temporary fake files. Native argv decoding is additionally exercised on
+# Windows; no installed app or real process is modified.
 $ErrorActionPreference = 'Stop'
 . (Join-Path $Root 'scripts/common-windows.ps1')
 $script:checks = 0
@@ -10,6 +11,84 @@ function Assert-Fixture {
   param([bool]$Condition, [string]$Message)
   if (-not $Condition) { throw $Message }
   $script:checks += 1
+}
+
+& {
+  # Keep the real file checks, Authenticode gate, version parsing, and UTF-8
+  # identity decoder. Only signature discovery and native execution are faked;
+  # the temporary .exe contains text and must never be executed by any test.
+  $nodeTrustRoot = Join-Path ([IO.Path]::GetTempPath()) ('dream-skin-node-trust-' + [guid]::NewGuid().ToString('N'))
+  # Construct non-ASCII text without depending on PS5.1's script-file encoding.
+  $unicodeName = [string][char]0x4E2D + [char]0x6587 + ' runtime with spaces'
+  $null = [IO.Directory]::CreateDirectory((Join-Path $nodeTrustRoot $unicodeName))
+  $fixtureCandidate = Join-Path (Join-Path $nodeTrustRoot $unicodeName) 'node.exe'
+  $fixtureMissingPath = Join-Path $nodeTrustRoot 'missing-node.exe'
+  [IO.File]::WriteAllText($fixtureCandidate, 'Not an executable. Native execution is mocked.')
+  function Invoke-NodeTrustFixture {
+    param([string]$Status = 'Valid', [string]$Subject = 'CN=OpenJS Foundation, O=OpenJS Foundation, C=US',
+      [string]$Version = '22.23.1', [int]$VersionExit = 0, [switch]$MissingFile,
+      [ValidateSet('valid','invalid-base64','missing-path')][string]$Identity = 'valid')
+    $script:nodeTrustEvents = @()
+    function Get-Command {
+      param($Name,$CommandType)
+      if ($Name -ne 'Get-AuthenticodeSignature' -or $CommandType -ne 'Cmdlet') { throw 'Unexpected command discovery.' }
+      return [pscustomobject]@{Name=$Name;CommandType='Cmdlet'}
+    }
+    function Get-AuthenticodeSignature {
+      param($LiteralPath)
+      if ($LiteralPath -cne $fixtureCandidate) { throw 'Signature inspection lost the candidate path.' }
+      $script:nodeTrustEvents += 'signature'
+      return [pscustomobject]@{Status=$Status;SignerCertificate=[pscustomobject]@{Subject=$Subject}}
+    }
+    function Invoke-DreamSkinNative {
+      param($FilePath,$ArgumentList,[switch]$DiscardStderr)
+      if ($FilePath -cne $fixtureCandidate) { throw 'Native probe lost the candidate path.' }
+      if ($ArgumentList.Count -eq 2 -and $ArgumentList[0] -eq '-p' -and $ArgumentList[1] -eq 'process.versions.node') {
+        $script:nodeTrustEvents += 'version-probe'
+        return [pscustomobject]@{ExitCode=$VersionExit;Output=@($Version)}
+      }
+      if ($ArgumentList.Count -eq 2 -and $ArgumentList[0] -eq '-e' -and
+        $ArgumentList[1] -eq "process.stdout.write(Buffer.from(process.execPath, 'utf8').toString('base64'))") {
+        $script:nodeTrustEvents += 'identity-probe'
+        $encoded = if ($Identity -eq 'invalid-base64') { '%%%invalid%%%' } else {
+          $path = if ($Identity -eq 'missing-path') { $fixtureMissingPath } else { $fixtureCandidate }
+          [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($path))
+        }
+        return [pscustomobject]@{ExitCode=0;Output=@($encoded)}
+      }
+      throw 'Unexpected native execution request.'
+    }
+    $runtime = $null; $failure = ''
+    $inputPath = if ($MissingFile) { $fixtureMissingPath } else { $fixtureCandidate }
+    try { $runtime = Get-DreamSkinValidatedNodeRuntime -Path $inputPath } catch { $failure = $_.Exception.Message }
+    return [pscustomobject]@{Runtime=$runtime;Failure=$failure;Events=($script:nodeTrustEvents -join ',')}
+  }
+  try {
+    # Removing/reordering the signature gate must allow a native call and fail
+    # these assertions; an incidental downstream exception is not sufficient.
+    foreach ($case in @(
+      @{Name='invalid signature';Options=@{Status='NotSigned'};Error='*not validly signed*';Events='signature'},
+      @{Name='unknown publisher';Options=@{Subject='CN=Unknown Publisher, O=Unknown Publisher, C=US'};Error='*unexpected publisher*';Events='signature'},
+      @{Name='missing file';Options=@{MissingFile=$true};Error='*does not exist*';Events=''},
+      @{Name='old version';Options=@{Version='21.9.0'};Error='*22 or newer is required*';Events='signature,version-probe,identity-probe'},
+      @{Name='invalid version';Options=@{Version='not-a-version'};Error='*22 or newer is required*';Events='signature,version-probe,identity-probe'},
+      @{Name='failed version probe';Options=@{VersionExit=1};Error='*could not be validated*';Events='signature,version-probe'},
+      @{Name='invalid base64 identity';Options=@{Identity='invalid-base64'};Error='*executable path could not be validated*';Events='signature,version-probe,identity-probe'},
+      @{Name='missing identity path';Options=@{Identity='missing-path'};Error='*executable path could not be validated*';Events='signature,version-probe,identity-probe'}
+    )) {
+      $options = $case.Options
+      $result = Invoke-NodeTrustFixture @options
+      Assert-Fixture ($null -eq $result.Runtime -and $result.Failure -like $case.Error -and $result.Events -ceq $case.Events) `
+        "Node trust rejected incorrectly or executed past the $($case.Name) boundary: $($result.Failure); events=$($result.Events)"
+    }
+    foreach ($version in @('22.23.1','24.1.0')) {
+      $result = Invoke-NodeTrustFixture -Version $version
+      Assert-Fixture (-not $result.Failure -and $result.Runtime.Path -ceq $fixtureCandidate -and
+        $result.Runtime.Version -ceq $version -and $result.Runtime.Major -ge 22 -and
+        $result.Events -ceq 'signature,version-probe,identity-probe') `
+        "Signed Node $version did not preserve the verified Unicode/space path: $($result.Failure)"
+    }
+  } finally { [IO.Directory]::Delete($nodeTrustRoot, $true) }
 }
 
 $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) 'dream-skin-lifecycle-fixture'
@@ -250,4 +329,4 @@ $copyFunction=$builderAst.Find({param($ast)
   Assert-Fixture ($script:releaseCopies.Count -eq 2) 'Release builder copied unexpected root files.'
 }
 
-Write-Output "PASS: $script:checks lifecycle regression assertions (all process and deletion APIs mocked)."
+Write-Output "PASS: $script:checks lifecycle regression assertions (app/process actions mocked; temporary files only)."
