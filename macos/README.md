@@ -29,9 +29,17 @@ Automatic restart of ordinary Codex is an elevated, explicit opt-in:
 ./macos/scripts/install-dream-skin-macos.sh --allow-automatic-codex-restart
 ```
 
-With that flag, the background monitor may invoke the restart path, which asks
-Codex to quit and can escalate to `TERM` and then `KILL` if it does not exit.
-Do not enable it when unsaved work or another Codex session must be preserved.
+With that flag, the background monitor may invoke the restart path only after
+the local Codex session records confirm that no task from the current app run
+is active. It checks once in the monitor and again immediately before quitting
+Codex. Active work, malformed records, multiple main processes, or any uncertain
+state fail closed: the monitor defers the restart. An allowed restart asks Codex
+to quit and can escalate to `TERM` and then `KILL` if it does not exit.
+
+The monitor, activity guard, theme validation, and renderer recovery are fixed
+local programs. They do not call a language model, a provider API, or consume
+Tokens. They read only local process state, local session lifecycle events, and
+local theme files.
 
 Restore first suspends the monitor, completes the restore, and persists native
 mode so the monitor cannot reapply the skin. A failed reinstall rolls back with

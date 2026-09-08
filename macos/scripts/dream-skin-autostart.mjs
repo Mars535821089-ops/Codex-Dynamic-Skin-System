@@ -12,6 +12,10 @@ const REQUIRED_FLAGS = [
 const PORT_FLAG = /(?:^|\s)--remote-debugging-port=(\d{4,5})(?=\s|$)/u;
 const ISOLATED_PROFILE_FLAG = /(?:^|\s)--user-data-dir(?:=|\s)/u;
 const DEFAULT_COOLDOWN_MS = 5 * 60 * 1000;
+const MAX_SESSION_TAIL_BYTES = 16 * 1024 * 1024;
+const SESSION_CLOCK_TOLERANCE_MS = 2_000;
+const ACTIVE_EVENT = "task_started";
+const TERMINAL_EVENTS = new Set(["task_complete", "turn_aborted"]);
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -56,6 +60,99 @@ export function watcherStateFromStatus(output) {
     // Malformed or missing status is deliberately fail-closed.
   }
   return "unhealthy";
+}
+
+export function decidePlainLaunchCorrection(activity) {
+  if (activity?.status === "idle" && activity?.activeCount === 0) {
+    return { allowRestart: true, reason: "idle" };
+  }
+  if (activity?.status === "busy") {
+    return { allowRestart: false, reason: "active-task" };
+  }
+  return { allowRestart: false, reason: "activity-unknown" };
+}
+
+async function collectSessionFiles(root, output) {
+  const entries = await fs.readdir(root, { withFileTypes: true });
+  for (const entry of entries) {
+    const target = path.join(root, entry.name);
+    if (entry.isSymbolicLink()) throw new Error("session-tree-symlink");
+    if (entry.isDirectory()) await collectSessionFiles(target, output);
+    else if (entry.isFile() && entry.name.endsWith(".jsonl")) output.push(target);
+  }
+}
+
+async function readSessionTail(filePath, size) {
+  const length = Math.min(size, MAX_SESSION_TAIL_BYTES);
+  const handle = await fs.open(filePath, "r");
+  try {
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, size - length);
+    let value = buffer.subarray(0, bytesRead).toString("utf8");
+    const truncated = length < size;
+    if (truncated) {
+      const firstNewline = value.indexOf("\n");
+      value = firstNewline >= 0 ? value.slice(firstNewline + 1) : "";
+    }
+    return { text: value, truncated };
+  } finally {
+    await handle.close();
+  }
+}
+
+function lifecycleEvent(record, appStartedAtMs) {
+  const type = record?.type === "event_msg" ? record?.payload?.type : record?.type;
+  if (type !== ACTIVE_EVENT && !TERMINAL_EVENTS.has(type)) return null;
+  const timestamp = Date.parse(record?.timestamp || "");
+  if (!Number.isFinite(timestamp) || timestamp < appStartedAtMs - SESSION_CLOCK_TOLERANCE_MS) {
+    return null;
+  }
+  return { type, timestamp };
+}
+
+export async function probeSessionActivity(sessionsRoot, appStartedAtMs) {
+  if (!path.isAbsolute(sessionsRoot || "") || !Number.isFinite(appStartedAtMs)) {
+    return { status: "unknown", activeCount: 0 };
+  }
+  try {
+    const rootStat = await fs.lstat(sessionsRoot);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+      return { status: "unknown", activeCount: 0 };
+    }
+    const files = [];
+    await collectSessionFiles(sessionsRoot, files);
+    let activeCount = 0;
+    let uncertain = false;
+    for (const filePath of files) {
+      const stat = await fs.lstat(filePath);
+      if (!stat.isFile() || stat.isSymbolicLink()) {
+        uncertain = true;
+        continue;
+      }
+      if (stat.mtimeMs < appStartedAtMs - SESSION_CLOCK_TOLERANCE_MS) continue;
+      const { text, truncated } = await readSessionTail(filePath, stat.size);
+      let latest = null;
+      for (const line of text.split(/\r?\n/u)) {
+        if (!line.trim()) continue;
+        let record;
+        try {
+          record = JSON.parse(line);
+        } catch {
+          uncertain = true;
+          continue;
+        }
+        const event = lifecycleEvent(record, appStartedAtMs);
+        if (event && (!latest || event.timestamp >= latest.timestamp)) latest = event;
+      }
+      if (latest?.type === ACTIVE_EVENT) activeCount += 1;
+      else if (!latest && truncated) uncertain = true;
+    }
+    if (activeCount > 0) return { status: "busy", activeCount };
+    if (uncertain) return { status: "unknown", activeCount: 0 };
+    return { status: "idle", activeCount: 0 };
+  } catch {
+    return { status: "unknown", activeCount: 0 };
+  }
 }
 
 export function decideAutostartAction(
@@ -158,8 +255,24 @@ async function writeState(statePath, value) {
   await fs.chmod(statePath, 0o600);
 }
 
-async function runCorrection(startScript, action) {
-  const child = spawn("/bin/bash", [startScript, ...correctionArguments(action)], {
+async function processStartedAt(pid) {
+  const result = await collectChild(spawn("/bin/ps", ["-p", String(pid), "-o", "lstart="], {
+    stdio: ["ignore", "pipe", "pipe"],
+  }));
+  const timestamp = result.code === 0 ? Date.parse(result.stdout.trim()) : NaN;
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+async function runCorrection(startScript, action, sessionsRoot) {
+  const args = [startScript, ...correctionArguments(action)];
+  if (action === "restart") {
+    args.push(
+      "--auto-restart-idle-only",
+      "--sessions-root", sessionsRoot,
+      "--activity-probe", fileURLToPath(import.meta.url),
+    );
+  }
+  const child = spawn("/bin/bash", args, {
     stdio: ["ignore", "inherit", "inherit"],
   });
   return new Promise((resolve) => {
@@ -179,18 +292,29 @@ export function parseAutostartArguments(argv) {
     const argument = argv[index];
     if (argument === "--watch") options.watch = true;
     else if (argument === "--once") options.once = true;
+    else if (argument === "--activity-once") options.activityOnce = true;
     else if (argument === "--app-executable") options.executable = argv[++index];
     else if (argument === "--start-script") options.startScript = argv[++index];
     else if (argument === "--status-script") options.statusScript = argv[++index];
     else if (argument === "--state") options.statePath = argv[++index];
     else if (argument === "--disabled-marker") options.disabledMarker = argv[++index];
+    else if (argument === "--sessions-root") options.sessionsRoot = argv[++index];
+    else if (argument === "--app-pid") options.appPid = Number(argv[++index]);
     else if (argument === "--allow-codex-restart") options.allowCodexRestart = true;
     else if (argument === "--interval-ms") options.intervalMs = Number(argv[++index]);
     else if (argument === "--grace-ms") options.graceMs = Number(argv[++index]);
     else if (argument === "--cooldown-ms") options.cooldownMs = Number(argv[++index]);
     else throw new Error(`Unknown argument: ${argument}`);
   }
-  if (options.watch === options.once) throw new Error("Choose exactly one of --watch or --once");
+  const modes = [options.watch, options.once, options.activityOnce].filter(Boolean).length;
+  if (modes !== 1) throw new Error("Choose exactly one run mode");
+  if (!path.isAbsolute(options.sessionsRoot || "")) throw new Error("sessionsRoot must be an absolute path");
+  if (options.activityOnce) {
+    if (!Number.isSafeInteger(options.appPid) || options.appPid <= 1) {
+      throw new Error("appPid must be a positive process identifier");
+    }
+    return options;
+  }
   for (const [key, value] of [
     ["executable", options.executable],
     ["startScript", options.startScript],
@@ -220,6 +344,15 @@ async function pathExists(file) {
 
 async function main() {
   const options = parseAutostartArguments(process.argv);
+  if (options.activityOnce) {
+    const startedAt = await processStartedAt(options.appPid);
+    const activity = startedAt === null
+      ? { status: "unknown", activeCount: 0 }
+      : await probeSessionActivity(options.sessionsRoot, startedAt);
+    process.stdout.write(`${JSON.stringify(activity)}\n`);
+    if (!decidePlainLaunchCorrection(activity).allowRestart) process.exitCode = 3;
+    return;
+  }
   for (const [label, file] of [
     ["Start script", options.startScript],
     ["Status script", options.statusScript],
@@ -266,6 +399,25 @@ async function main() {
       );
       if (correctionStillRequired) {
         const attemptedAt = Date.now();
+        if (decision.action === "restart") {
+          const startedAt = await processStartedAt(decision.pid);
+          const activity = startedAt === null
+            ? { status: "unknown", activeCount: 0 }
+            : await probeSessionActivity(options.sessionsRoot, startedAt);
+          const permission = decidePlainLaunchCorrection(activity);
+          if (!permission.allowRestart) {
+            await writeState(options.statePath, {
+              lastAttemptPid: decision.pid,
+              lastAttemptAt: attemptedAt,
+              lastResult: permission.reason,
+              observedStopped: false,
+            });
+            console.log(`[dream-skin-autostart] automatic restart deferred reason=${permission.reason}`);
+            if (options.once) break;
+            if (!stopping) await sleep(options.intervalMs);
+            continue;
+          }
+        }
         await writeState(options.statePath, {
           lastAttemptPid: decision.pid,
           lastAttemptAt: attemptedAt,
@@ -273,7 +425,7 @@ async function main() {
           observedStopped: false,
         });
         console.log(`[dream-skin-autostart] ${decision.action} pid=${decision.pid}`);
-        const exitCode = await runCorrection(options.startScript, decision.action);
+        const exitCode = await runCorrection(options.startScript, decision.action, options.sessionsRoot);
         await writeState(options.statePath, {
           lastAttemptPid: decision.pid,
           lastAttemptAt: attemptedAt,

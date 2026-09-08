@@ -118,6 +118,7 @@ monitor_arguments=(
   --status-script "$SCRIPT_DIR/status-dream-skin-macos.sh"
   --state "$AUTOSTART_STATE"
   --disabled-marker "$DISABLED_MARKER"
+  --sessions-root "$HOME/.codex/sessions"
 )
 if [ "$ALLOW_CODEX_RESTART" = "true" ]; then
   monitor_arguments+=(--allow-codex-restart)

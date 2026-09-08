@@ -1,12 +1,17 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import fsp from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import {
   classifyCodexProcesses,
   correctionArguments,
+  decidePlainLaunchCorrection,
   decideAutostartAction,
   parseAutostartArguments,
+  probeSessionActivity,
   watcherStateFromStatus,
 } from "../scripts/dream-skin-autostart.mjs";
 
@@ -81,6 +86,85 @@ test("a plain Codex is never restarted unless automatic restart was explicitly e
   );
 });
 
+async function withSessions(files, callback) {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "dream-skin-sessions-"));
+  try {
+    for (const [relativePath, lines] of Object.entries(files)) {
+      const target = path.join(root, relativePath);
+      await fsp.mkdir(path.dirname(target), { recursive: true });
+      await fsp.writeFile(target, `${lines.join("\n")}\n`, "utf8");
+    }
+    return await callback(root);
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true });
+  }
+}
+
+const activityEvent = (timestamp, type) => JSON.stringify({
+  timestamp: new Date(timestamp).toISOString(),
+  type: "event_msg",
+  payload: { type },
+});
+
+test("automatic restart is blocked while a current Codex task is active", async () => {
+  await withSessions({
+    "2026/09/08/active.jsonl": [activityEvent(20_000, "task_started")],
+  }, async (root) => {
+    assert.deepEqual(await probeSessionActivity(root, 10_000), {
+      status: "busy",
+      activeCount: 1,
+    });
+  });
+  assert.deepEqual(decidePlainLaunchCorrection({ status: "busy", activeCount: 1 }), {
+    allowRestart: false,
+    reason: "active-task",
+  });
+});
+
+test("automatic restart is allowed only after every current task is terminal", async () => {
+  await withSessions({
+    "2026/09/08/complete.jsonl": [
+      activityEvent(20_000, "task_started"),
+      activityEvent(21_000, "task_complete"),
+    ],
+  }, async (root) => {
+    assert.deepEqual(await probeSessionActivity(root, 10_000), {
+      status: "idle",
+      activeCount: 0,
+    });
+  });
+  assert.deepEqual(decidePlainLaunchCorrection({ status: "idle", activeCount: 0 }), {
+    allowRestart: true,
+    reason: "idle",
+  });
+});
+
+test("uncertain current activity fails closed and the start script rechecks before stopping Codex", async () => {
+  await withSessions({
+    "2026/09/08/broken.jsonl": [
+      JSON.stringify({ timestamp: new Date(20_000).toISOString(), type: "event_msg", payload: { type: "token_count" } }),
+      "{not-json",
+    ],
+  }, async (root) => {
+    assert.deepEqual(await probeSessionActivity(root, 10_000), {
+      status: "unknown",
+      activeCount: 0,
+    });
+  });
+  assert.deepEqual(decidePlainLaunchCorrection({ status: "unknown", activeCount: 0 }), {
+    allowRestart: false,
+    reason: "activity-unknown",
+  });
+  const startSource = fs.readFileSync(
+    new URL("../scripts/start-dream-skin-macos.sh", import.meta.url),
+    "utf8",
+  );
+  const guard = startSource.indexOf("verify_automatic_restart_is_idle");
+  const stop = startSource.indexOf("stop_codex true", guard);
+  assert.ok(guard >= 0 && stop > guard);
+  assert.match(startSource, /--activity-once/u);
+});
+
 test("a persistent native-mode intent disables every supervisor correction", () => {
   assert.deepEqual(
     decideAutostartAction(
@@ -103,6 +187,7 @@ test("automatic restart and the persistent disabled marker are explicit CLI capa
     "--status-script", "/safe/status.sh",
     "--state", "/safe/state.json",
     "--disabled-marker", "/safe/native.disabled",
+    "--sessions-root", "/safe/sessions",
   ];
   assert.equal(parseAutostartArguments(base).allowCodexRestart, false);
   assert.equal(parseAutostartArguments(base).disabledMarker, "/safe/native.disabled");
@@ -111,7 +196,7 @@ test("automatic restart and the persistent disabled marker are explicit CLI capa
     true,
   );
   assert.throws(
-    () => parseAutostartArguments(base.slice(0, -2)),
+    () => parseAutostartArguments([...base.slice(0, -4), ...base.slice(-2)]),
     /disabledMarker must be an absolute path/u,
   );
 });
@@ -143,6 +228,16 @@ test("watcher repair is structurally unable to request a Codex restart", () => {
     startSource,
     /if \[ "\$REPAIR_WATCHER_ONLY" = "true" \] && \[ "\$DEBUG_READY" != "true" \]; then\n  fail "Watcher-only repair requires/u,
   );
+});
+
+test("status detects the real app executable instead of relying on a truncated process name", () => {
+  const statusSource = fs.readFileSync(
+    new URL("../scripts/status-dream-skin-macos.sh", import.meta.url),
+    "utf8",
+  );
+  assert.doesNotMatch(statusSource, /\/usr\/bin\/pgrep -x (?:ChatGPT|Codex)/u);
+  assert.match(statusSource, /\/bin\/ps -axo command=/u);
+  assert.match(statusSource, /Contents\\\/MacOS\\\/\(ChatGPT\|Codex\)/u);
 });
 
 test("recent corrections are cooled down, but failed repairs retry afterwards", () => {

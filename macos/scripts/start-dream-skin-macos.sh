@@ -39,6 +39,9 @@ RESTART_EXISTING="false"
 PROMPT_RESTART="false"
 FOREGROUND_INJECTOR="false"
 REPAIR_WATCHER_ONLY="false"
+AUTO_RESTART_IDLE_ONLY="false"
+AUTO_SESSIONS_ROOT=""
+AUTO_ACTIVITY_PROBE=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --port) PORT="${2:-}"; PORT_EXPLICIT="true"; shift 2 ;;
@@ -46,11 +49,20 @@ while [ "$#" -gt 0 ]; do
     --prompt-restart) PROMPT_RESTART="true"; shift ;;
     --foreground-injector) FOREGROUND_INJECTOR="true"; shift ;;
     --repair-watcher-only) REPAIR_WATCHER_ONLY="true"; shift ;;
+    --auto-restart-idle-only) AUTO_RESTART_IDLE_ONLY="true"; shift ;;
+    --sessions-root) AUTO_SESSIONS_ROOT="${2:-}"; shift 2 ;;
+    --activity-probe) AUTO_ACTIVITY_PROBE="${2:-}"; shift 2 ;;
     *) fail "Unknown start argument: $1" ;;
   esac
 done
 case "$PORT" in ''|*[!0-9]*) fail "Invalid port: $PORT" ;; esac
 [ "$PORT" -ge 1024 ] && [ "$PORT" -le 65535 ] || fail "Port must be between 1024 and 65535."
+if [ "$AUTO_RESTART_IDLE_ONLY" = "true" ]; then
+  case "$AUTO_SESSIONS_ROOT" in /*) ;; *) fail "Automatic restart sessions root must be absolute." ;; esac
+  case "$AUTO_ACTIVITY_PROBE" in /*) ;; *) fail "Automatic restart activity probe must be absolute." ;; esac
+  [ -f "$AUTO_ACTIVITY_PROBE" ] && [ ! -L "$AUTO_ACTIVITY_PROBE" ] \
+    || fail "Automatic restart activity probe is missing or unsafe."
+fi
 [ "$REPAIR_WATCHER_ONLY" != "true" ] || {
   [ "$RESTART_EXISTING" = "false" ] && [ "$PROMPT_RESTART" = "false" ] \
     && [ "$FOREGROUND_INJECTOR" = "false" ] \
@@ -65,6 +77,18 @@ if [ "$FOREGROUND_INJECTOR" != "true" ]; then
 fi
 discover_codex_app
 require_signed_node_runtime
+
+verify_automatic_restart_is_idle() {
+  [ "$AUTO_RESTART_IDLE_ONLY" = "true" ] || return 0
+  local main_pids main_pid
+  main_pids="$(codex_main_pids)"
+  [ "$(printf '%s\n' "$main_pids" | /usr/bin/awk 'NF { count += 1 } END { print count + 0 }')" -eq 1 ] \
+    || fail "Automatic restart could not identify exactly one main Codex process; refusing to restart."
+  main_pid="$(printf '%s\n' "$main_pids" | /usr/bin/awk 'NF { print; exit }')"
+  "$NODE" "$AUTO_ACTIVITY_PROBE" --activity-once \
+    --sessions-root "$AUTO_SESSIONS_ROOT" --app-pid "$main_pid" >/dev/null \
+    || fail "A Codex task is active or session activity is uncertain; refusing automatic restart."
+}
 
 if [ "$PORT_EXPLICIT" = "false" ] && [ -f "$STATE_PATH" ]; then
   saved_port="$(state_field port)" || fail "Could not read the existing state port."
@@ -111,6 +135,7 @@ APPLESCRIPT
     RESTART_EXISTING="true"
   fi
   [ "$RESTART_EXISTING" = "true" ] || fail "ChatGPT is already running without the verified skin CDP endpoint. Close it first or pass --restart-existing."
+  verify_automatic_restart_is_idle
   stop_codex true
 fi
 
