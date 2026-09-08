@@ -18,7 +18,7 @@ If this project helps you, a Star is a welcome way to support continued compatib
 5. To use the ordinary Codex icon, enable **Auto-inject on normal Codex launch (idle restart only)** in the system tray. Also enable **Launch at login** to keep observation after a computer restart.
 6. For a complete restore that leaves Codex closed, run `& ".\windows\scripts\restore-dream-skin.ps1" -RestoreBaseTheme -NoRelaunch` in PowerShell.
 
-A healthy injector is never reapplied on a timer. Ordinary launches get a 10-second grace period. Active tasks, unknown activity or ambiguous process identity block automatic restart. An attempt is latched to prevent restart loops. Pause is respected, a closed Codex stays closed, and background video is disabled by default.
+A healthy injector is never reapplied on a timer. Ordinary launches get a 10-second grace period. Active tasks, unknown activity or ambiguous process identity block automatic restart. The restart latch is set only immediately before requesting a close; requests refused by earlier safety checks receive a five-minute cooldown, not a permanent latch. Clearing the latch requires ten seconds of confirmed closure and no startup operation in progress. Pause is respected, a closed Codex stays closed, and background video is disabled by default.
 
 User themes and state are stored below `%LOCALAPPDATA%\CodexDreamSkin`. The injector validates the selected official application and does not patch its packaged source.
 

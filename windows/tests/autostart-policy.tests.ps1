@@ -66,8 +66,12 @@ try { Get-DreamSkinAutostartInventory -Installs $installs; throw 'Inventory fail
 catch { if ($_.Exception.Message -cne 'WMI unavailable') { throw } }
 $script:inventoryFails = $false
 
-$closeState = @{ SeenMain = $false; ClosedSince = 0 }
+$closeState = @{ ClosedSince = 0 }
 if (Update-DreamSkinAutostartCloseObservation -State $closeState -MainCount 0 -NowMs 1000000) { throw 'First empty frame cannot rearm' }
+if (-not (Update-DreamSkinAutostartCloseObservation -State $closeState -MainCount 0 -NowMs 1010000)) {
+  throw 'A fresh observer must recognize a continuous closed interval after computer or tray restart'
+}
+$closeState = @{ ClosedSince = 0 }
 [void](Update-DreamSkinAutostartCloseObservation -State $closeState -MainCount 1 -NowMs 1000001)
 if (Update-DreamSkinAutostartCloseObservation -State $closeState -MainCount 0 -NowMs 1000002) { throw 'Temporary close cannot rearm' }
 if (Update-DreamSkinAutostartCloseObservation -State $closeState -MainCount 0 -NowMs 1009002) { throw 'Close grace was not respected' }
@@ -81,4 +85,85 @@ foreach ($content in @('{}', '{"RestartLatched":null}', '{"RestartLatched":false
 }
 $valid = Read-DreamSkinAutostartRestartState -Content '{"RestartLatched":true,"LastAttemptAt":900000}'
 if (-not $valid.RestartLatched -or $valid.LastAttemptAt -ne 900000) { throw 'Valid restart history rejected' }
+
+# Exercise the real shared disk helpers before mocking their I/O below. Never
+# touch a user's state directory: this fixture owns one fresh temporary folder.
+$historyRoot = Join-Path ([IO.Path]::GetTempPath()) ('dream-skin-history-' + [guid]::NewGuid().ToString('N'))
+[IO.Directory]::CreateDirectory($historyRoot) | Out-Null
+try {
+  $initialHistory = Get-DreamSkinAutostartRestartState -StateRoot $historyRoot
+  if ($initialHistory.RestartLatched -or $initialHistory.LastAttemptAt -ne 0) { throw 'Missing history is not a first run.' }
+  Write-DreamSkinAutostartRestartState -StateRoot $historyRoot -State @{ RestartLatched = $true; LastAttemptAt = 900000 }
+  $diskHistory = Get-DreamSkinAutostartRestartState -StateRoot $historyRoot
+  if (-not $diskHistory.RestartLatched -or $diskHistory.LastAttemptAt -ne 900000) { throw 'Durable restart latch did not round-trip.' }
+  $historyPath = Join-Path $historyRoot 'autostart-state.json'
+  foreach ($invalidHistory in @('broken-json', '{}', '{"RestartLatched":false,"LastAttemptAt":-1}')) {
+    [IO.File]::WriteAllText($historyPath, $invalidHistory)
+    if (-not (Get-DreamSkinAutostartRestartState -StateRoot $historyRoot).RestartLatched -or
+      [IO.File]::ReadAllText($historyPath) -cne $invalidHistory) {
+      throw 'Corrupt history allowed restart or was silently rewritten while reading.'
+    }
+  }
+  [IO.File]::Delete($historyPath)
+  [IO.Directory]::CreateDirectory($historyPath) | Out-Null
+  if (-not (Get-DreamSkinAutostartRestartState -StateRoot $historyRoot).RestartLatched) {
+    throw 'A directory at the history path was mistaken for a first run.'
+  }
+} finally { [IO.Directory]::Delete($historyRoot, $true) }
+
+# Dispatch reserves only a cooldown, under the shared operation lock. A stale
+# observer must re-read history instead of overwriting a latch written by a child.
+$script:history = @{ RestartLatched = $false; LastAttemptAt = 0 }
+$script:historyEvents = @()
+$script:historyLockHeld = $false
+$script:historyLockBusy = $false
+function Enter-DreamSkinOperationLock {
+  param($TimeoutMilliseconds)
+  $script:historyEvents += 'lock'
+  if ($script:historyLockBusy) { throw 'Operation is busy.' }
+  $script:historyLockHeld = $true
+  return 'mock-operation-lock'
+}
+function Exit-DreamSkinOperationLock {
+  param($Mutex)
+  $script:historyEvents += 'unlock'
+  $script:historyLockHeld = $false
+}
+function Get-DreamSkinAutostartRestartState {
+  param($StateRoot)
+  if (-not $script:historyLockHeld) { throw 'Dispatch did not serialize its history read.' }
+  $script:historyEvents += 'read'
+  return $script:history.Clone()
+}
+function Write-DreamSkinAutostartRestartState {
+  param($StateRoot, $State)
+  if (-not $script:historyLockHeld) { throw 'Dispatch did not serialize its history write.' }
+  $script:historyEvents += 'write'
+  $script:history = $State.Clone()
+}
+$reservation = Reserve-DreamSkinAutostartAttempt -StateRoot 'mock-state' -Snapshot $base -NowMs 1000000
+if (-not $reservation.Granted -or $script:history.RestartLatched -or $script:history.LastAttemptAt -ne 1000000 -or
+  ($script:historyEvents -join ',') -cne 'lock,read,write,unlock') {
+  throw 'Observer prearmed the latch or failed to reserve cooldown under the operation lock.'
+}
+$script:historyEvents = @()
+$reservation = Reserve-DreamSkinAutostartAttempt -StateRoot 'mock-state' -Snapshot $base -NowMs 1000001
+if ($reservation.Granted -or $script:historyEvents -contains 'write') { throw 'A second pending dispatch bypassed cooldown.' }
+$script:history = @{ RestartLatched = $true; LastAttemptAt = 1000000 }
+$script:historyEvents = @()
+$reservation = Reserve-DreamSkinAutostartAttempt -StateRoot 'mock-state' -Snapshot $base -NowMs 1400000
+if ($reservation.Granted -or -not $reservation.State.RestartLatched -or
+  -not $script:history.RestartLatched -or $script:historyEvents -contains 'write') {
+  throw 'A stale observer overwrote the durable child latch.'
+}
+$repairSnapshot = $base.Clone(); $repairSnapshot.EndpointReady = $true
+$reservation = Reserve-DreamSkinAutostartAttempt -StateRoot 'mock-state' -Snapshot $repairSnapshot -NowMs 1400000
+if (-not $reservation.Granted -or -not $script:history.RestartLatched) {
+  throw 'Safe watcher repair was blocked by or cleared the restart latch.'
+}
+$script:history = @{ RestartLatched = $false; LastAttemptAt = 0 }
+$script:historyLockBusy = $true
+try { Reserve-DreamSkinAutostartAttempt -StateRoot 'mock-state' -Snapshot $base -NowMs 1500000; throw 'Expected a busy operation lock.' }
+catch { if ($_.Exception.Message -cne 'Operation is busy.') { throw } }
+if ($script:history.RestartLatched -or $script:history.LastAttemptAt -ne 0) { throw 'Lock contention changed restart history.' }
 Write-Output 'PASS: autostart preserves paused/busy profiles, startup grace, cooldown, and restart latch.'

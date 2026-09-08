@@ -301,6 +301,16 @@ try {
     if ($AutoRestartIdleOnly) {
       Assert-DreamSkinAutomaticStartupParent -ProcessId $ParentProcessId -StartedAt $ParentStartedAt
       Assert-DreamSkinAutomaticRestartConsent -StateRoot $StateRoot
+      # We still hold the operation lock and have passed the final idle,
+      # parent, consent, and process checks. Arm durably only at the actual
+      # close boundary; no later failure is allowed to unlatch this attempt.
+      $restartHistory = Get-DreamSkinAutostartRestartState -StateRoot $StateRoot
+      if ($restartHistory.RestartLatched) {
+        throw 'An automatic restart was already attempted or its history is uncertain; Codex was preserved.'
+      }
+      $restartHistory.RestartLatched = $true
+      $restartHistory.LastAttemptAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+      Write-DreamSkinAutostartRestartState -StateRoot $StateRoot -State $restartHistory
       Stop-DreamSkinCodex -Codex $codexToStop -ExpectedProcessId $ExpectedCodexPid -ExpectedStartedAt $ExpectedCodexStartedAt
     } else {
       Stop-DreamSkinCodex -Codex $codexToStop -ProfilePath $ProfilePath -AllowForce

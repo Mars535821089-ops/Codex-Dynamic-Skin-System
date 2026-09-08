@@ -15,9 +15,13 @@ if ($source.Contains('$PSScriptRoot')) { throw 'Fixture left a real runtime impo
 function Invoke-StartFixture {
   param([string]$Mode, [string]$Activity = 'idle', [switch]$Recycled, [switch]$Paused,
     [switch]$DisappearDuringProbe, [switch]$FailVerify,
+    [switch]$LockBusy, [switch]$Latched, [switch]$CorruptHistory,
+    [switch]$FailHistoryWrite, [switch]$FailStop, [switch]$FailLaunch,
     [ValidateSet('alive','missing','reused','at-lock','at-probe','after-stop','at-endpoint')][string]$ParentState = 'alive',
     [ValidateSet('enabled','missing','revoked-during-probe')][string]$ConsentState = 'enabled')
   $script:events = @()
+  $script:operationHeld = $false
+  $script:history = @{ RestartLatched = [bool]$Latched; LastAttemptAt = 1234 }
   $script:identityCalls = 0
   $script:clockCalls = 0
   $script:ready = $Mode -like 'repair-*'
@@ -44,10 +48,26 @@ function Invoke-StartFixture {
   function Enter-DreamSkinOperationLock {
     param($TimeoutMilliseconds)
     $script:events += 'lock'
+    if ($LockBusy) { throw 'Operation is busy.' }
+    $script:operationHeld = $true
     if ($script:parentState -eq 'at-lock') { $script:parent.HasExited = $true }
     return 'mock-lock'
   }
-  function Exit-DreamSkinOperationLock { param($Mutex); $script:events += 'unlock' }
+  function Exit-DreamSkinOperationLock { param($Mutex); $script:events += 'unlock'; $script:operationHeld = $false }
+  function Get-DreamSkinAutostartRestartState {
+    param($StateRoot)
+    if (-not $script:operationHeld) { throw 'Child read history outside its operation lock.' }
+    $script:events += 'read-history'
+    if ($CorruptHistory) { return @{ RestartLatched = $true; LastAttemptAt = 0 } }
+    return $script:history.Clone()
+  }
+  function Write-DreamSkinAutostartRestartState {
+    param($StateRoot, $State)
+    if (-not $script:operationHeld) { throw 'Child wrote history outside its operation lock.' }
+    if ($FailHistoryWrite) { throw 'History write failed.' }
+    $script:events += 'write-history'
+    $script:history = $State.Clone()
+  }
   function Assert-DreamSkinPort { param($Port) }
   function Get-DreamSkinNodeRuntime { return [pscustomobject]@{Path='mock-node.exe';Version='22.23.1'} }
   function Get-DreamSkinCodexInstall { return [pscustomobject]@{Executable='mock-codex.exe';PackageRoot='mock-package';Version='1.0.0'} }
@@ -96,13 +116,16 @@ function Invoke-StartFixture {
   function Stop-DreamSkinCodex {
     param($Codex,$ProfilePath,$ExpectedProcessId,$ExpectedStartedAt,[switch]$AllowForce)
     if ($ExpectedProcessId -ne 909 -or -not $ExpectedStartedAt) { throw 'Automatic stop omitted the expected process identity.' }
+    if (-not $script:history.RestartLatched) { throw 'Automatic stop did not durably arm the restart latch first.' }
     $script:events += 'stop-codex'; $script:allowForce = [bool]$AllowForce
+    if ($FailStop) { throw 'Graceful close failed.' }
     $script:running=$false; $script:ready=$false
     if ($script:parentState -eq 'after-stop') { $script:parent.HasExited = $true }
   }
   function Start-DreamSkinCodexForDebugging {
     param($Codex,$Arguments,$Port,$ProfilePath,$PreserveProcessIds)
     $script:events += 'launch-codex'; $script:running=$true; $script:ready=$true
+    if ($FailLaunch) { throw 'CDP launch failed.' }
     return [pscustomobject]@{Strategy='package-activation'}
   }
   function Start-DreamSkinCodex { param($Codex); $script:events += 'rollback-launch'; throw 'Unexpected rollback launch.' }
@@ -160,7 +183,7 @@ function Invoke-StartFixture {
     $parameters.ParentStartedAt = '2026-01-01T00:00:00Z'
     try { & ([scriptblock]::Create($source)) @parameters } catch { $script:lastFailure = $_.Exception.Message }
   } finally { $env:LOCALAPPDATA=$savedLocalAppData }
-  return [pscustomobject]@{Events=@($script:events);Failure=$script:lastFailure;AllowForce=$script:allowForce}
+  return [pscustomobject]@{Events=@($script:events);Failure=$script:lastFailure;AllowForce=$script:allowForce;History=$script:history.Clone()}
 }
 
 $checks=0
@@ -234,6 +257,36 @@ foreach ($consentState in @('missing','revoked-during-probe')) {
   $result = Invoke-StartFixture -Mode auto -ConsentState $consentState
   if (-not $result.Failure -or $result.Events -contains 'stop-codex' -or $result.Events -contains 'launch-codex') {
     throw "Automatic restart ignored missing or revoked consent: $consentState."
+  }
+  $checks++
+}
+foreach ($extra in @(
+  @{LockBusy=$true}, @{Activity='busy'}, @{Activity='unknown'}, @{Activity='failed'},
+  @{ParentState='at-probe'}, @{ConsentState='revoked-during-probe'}, @{Paused=$true},
+  @{DisappearDuringProbe=$true}, @{FailHistoryWrite=$true}
+)) {
+  $result = Invoke-StartFixture -Mode auto @extra
+  if (-not $result.Failure -or $result.History.RestartLatched -or
+    $result.Events -contains 'stop-codex' -or $result.Events -contains 'launch-codex') {
+    throw 'A refusal before closing Codex permanently latched restart or touched the app.'
+  }
+  $checks++
+}
+foreach ($extra in @(@{Latched=$true}, @{CorruptHistory=$true})) {
+  $result = Invoke-StartFixture -Mode auto @extra
+  if (-not $result.Failure -or $result.Events -contains 'write-history' -or
+    $result.Events -contains 'stop-codex' -or $result.Events -contains 'launch-codex') {
+    throw 'The child ignored a durable restart latch or corrupted history.'
+  }
+  $checks++
+}
+foreach ($extra in @(@{}, @{FailStop=$true}, @{FailLaunch=$true}, @{FailVerify=$true})) {
+  $result = Invoke-StartFixture -Mode auto @extra
+  if (-not $result.History.RestartLatched -or
+    @($result.Events | Where-Object { $_ -eq 'write-history' }).Count -ne 1 -or
+    $result.Events.IndexOf('write-history') -gt $result.Events.IndexOf('stop-codex') -or
+    $result.Events.IndexOf('write-history') -lt $result.Events.IndexOf('activity-probe')) {
+    throw 'A real close attempt was not durably latched after checks and before the stop.'
   }
   $checks++
 }

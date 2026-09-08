@@ -175,6 +175,47 @@ function Read-DreamSkinStartResult {
   return $result
 }
 
+function Read-DreamSkinAutostartRestartState {
+  param([string]$Content)
+  $saved = $Content | ConvertFrom-Json -ErrorAction Stop
+  if ($null -eq $saved -or $saved -is [array] -or $saved.RestartLatched -isnot [bool] -or
+    ($saved.LastAttemptAt -isnot [int] -and $saved.LastAttemptAt -isnot [long] -and $saved.LastAttemptAt -isnot [double]) -or
+    [double]::IsNaN([double]$saved.LastAttemptAt) -or [double]::IsInfinity([double]$saved.LastAttemptAt) -or
+    [double]$saved.LastAttemptAt -lt 0) { throw 'Invalid automatic restart history.' }
+  return @{ RestartLatched = $saved.RestartLatched; LastAttemptAt = [double]$saved.LastAttemptAt }
+}
+
+function Get-DreamSkinAutostartRestartState {
+  param([Parameter(Mandatory = $true)][string]$StateRoot)
+  $path = Join-Path $StateRoot 'autostart-state.json'
+  try {
+    if (Get-Command Assert-DreamSkinNoReparseComponents -ErrorAction SilentlyContinue) {
+      Assert-DreamSkinNoReparseComponents -Path $path
+    }
+    if (-not (Test-Path -LiteralPath $path -ErrorAction Stop)) {
+      return @{ RestartLatched = $false; LastAttemptAt = 0 }
+    }
+    return Read-DreamSkinAutostartRestartState -Content (Read-DreamSkinUtf8File -Path $path)
+  } catch {
+    # Missing is a first run; malformed, inaccessible, or non-file history is
+    # not. Only a locked, continuously observed closed app may clear this latch.
+    return @{ RestartLatched = $true; LastAttemptAt = 0 }
+  }
+}
+
+function Write-DreamSkinAutostartRestartState {
+  # Callers must hold the shared operation lock, including the observer. The
+  # child owns the transition to latched; dispatch only updates LastAttemptAt.
+  param([Parameter(Mandatory = $true)][string]$StateRoot,
+    [Parameter(Mandatory = $true)][object]$State)
+  $validated = Read-DreamSkinAutostartRestartState -Content ($State | ConvertTo-Json -Compress)
+  $path = Join-Path $StateRoot 'autostart-state.json'
+  if (Get-Command Assert-DreamSkinNoReparseComponents -ErrorAction SilentlyContinue) {
+    Assert-DreamSkinNoReparseComponents -Path $path
+  }
+  Write-DreamSkinUtf8FileAtomically -Path $path -Content ($validated | ConvertTo-Json -Compress)
+}
+
 function Enter-DreamSkinOperationLock {
   param(
     [ValidateRange(0, 300000)]

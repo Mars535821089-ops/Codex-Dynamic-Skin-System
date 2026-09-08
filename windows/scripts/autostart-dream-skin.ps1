@@ -4,6 +4,7 @@ param(
   [string]$ParentStartedAt,
   [int]$Port = 9335
 )
+. (Join-Path $PSScriptRoot 'common-windows.ps1')
 
 function Get-DreamSkinAutostartDecision {
   param([object]$Snapshot, [object]$State, [double]$NowMs)
@@ -52,33 +53,40 @@ function Update-DreamSkinAutostartCloseObservation {
   param([object]$State, [int]$MainCount, [double]$NowMs)
   if ($MainCount -ne 0) {
     $State.ClosedSince = 0
-    if ($MainCount -gt 0) { $State.SeenMain = $true }
     return $false
   }
-  if (-not $State.SeenMain) { return $false }
+  # A new observer must also recognize a closed app after a computer/tray
+  # restart. Clearing history still requires the operation lock and a second
+  # complete inventory below, so an in-flight startup cannot rearm itself.
   if (-not $State.ClosedSince) { $State.ClosedSince = $NowMs; return $false }
   return $NowMs - $State.ClosedSince -ge 10000
 }
 
-function Read-DreamSkinAutostartRestartState {
-  param([string]$Content)
-  $saved = $Content | ConvertFrom-Json -ErrorAction Stop
-  if ($null -eq $saved -or $saved -is [array] -or $saved.RestartLatched -isnot [bool] -or
-    ($saved.LastAttemptAt -isnot [int] -and $saved.LastAttemptAt -isnot [long] -and $saved.LastAttemptAt -isnot [double]) -or
-    [double]::IsNaN([double]$saved.LastAttemptAt) -or [double]::IsInfinity([double]$saved.LastAttemptAt) -or
-    [double]$saved.LastAttemptAt -lt 0) { throw 'Invalid automatic restart history.' }
-  return @{ RestartLatched = $saved.RestartLatched; LastAttemptAt = [double]$saved.LastAttemptAt }
+function Reserve-DreamSkinAutostartAttempt {
+  param([string]$StateRoot, [object]$Snapshot, [double]$NowMs)
+  $attemptLock = $null
+  try {
+    $attemptLock = Enter-DreamSkinOperationLock -TimeoutMilliseconds 0
+    $latest = Get-DreamSkinAutostartRestartState -StateRoot $StateRoot
+    $decision = Get-DreamSkinAutostartDecision -Snapshot $Snapshot -State $latest -NowMs $NowMs
+    if ($decision.Action -notin @('repair', 'restart')) {
+      return @{ Granted = $false; State = $latest; Decision = $decision }
+    }
+    $latest.LastAttemptAt = $NowMs
+    Write-DreamSkinAutostartRestartState -StateRoot $StateRoot -State $latest
+    return @{ Granted = $true; State = $latest; Decision = $decision }
+  } finally {
+    if ($null -ne $attemptLock) { Exit-DreamSkinOperationLock -Mutex $attemptLock }
+  }
 }
 
-# Dot sourcing exposes only the pure decision policy for portable mock tests.
+# Dot sourcing exposes only policy/helper definitions for portable mock tests.
 if ($MyInvocation.InvocationName -eq '.') { return }
 $ErrorActionPreference = 'Stop'
 if ($ParentProcessId -le 0 -or -not $ParentStartedAt) { throw 'A verified tray parent is required.' }
-. (Join-Path $PSScriptRoot 'common-windows.ps1')
 . (Join-Path $PSScriptRoot 'theme-windows.ps1')
 $explicitPort = $PSBoundParameters.ContainsKey('Port')
 $StateRoot = Join-Path $env:LOCALAPPDATA 'CodexDreamSkin'
-$watchStatePath = Join-Path $StateRoot 'autostart-state.json'
 $consentPath = Join-Path $StateRoot 'autostart-idle-restart.enabled'
 $node = Get-DreamSkinNodeRuntime
 $shellPath = (Get-Command powershell.exe -ErrorAction Stop).Source
@@ -88,7 +96,7 @@ $acquired = $false
 $watchState = @{ RestartLatched = $false; LastAttemptAt = 0 }
 $lastReason = ''
 $lastActivityProbeAt = 0
-$closeObservation = @{ SeenMain = $false; ClosedSince = 0 }
+$closeObservation = @{ ClosedSince = 0 }
 
 function Test-DreamSkinAutostartParent {
   $parent = $null
@@ -97,10 +105,6 @@ function Test-DreamSkinAutostartParent {
     [void]$parent.Handle
     return -not $parent.HasExited -and $parent.StartTime.ToUniversalTime().ToString('o') -ceq $ParentStartedAt
   } catch { return $false } finally { if ($null -ne $parent) { $parent.Dispose() } }
-}
-
-function Save-DreamSkinAutostartState {
-  Write-DreamSkinUtf8FileAtomically -Path $watchStatePath -Content ($watchState | ConvertTo-Json -Compress)
 }
 
 function Write-DreamSkinAutostartReason([string]$Reason) {
@@ -115,14 +119,6 @@ try {
   try { $acquired = $mutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $acquired = $true }
   if (-not $acquired) { exit 0 }
   Ensure-DreamSkinManagedDirectory -Path $StateRoot -Root $StateRoot
-  if (Test-Path -LiteralPath $watchStatePath -PathType Leaf) {
-    try {
-      $watchState = Read-DreamSkinAutostartRestartState -Content ([IO.File]::ReadAllText($watchStatePath))
-    } catch {
-      # Corrupt restart history must not authorize a second automatic restart.
-      $watchState.RestartLatched = $true
-    }
-  }
   $installs = @()
   $lastInstallProbe = 0
   $installProbeInterval = 60000
@@ -130,6 +126,8 @@ try {
     $delay = 2000
     try {
       if (-not (Test-Path -LiteralPath $StateRoot -PathType Container)) { break }
+      # The startup child may have armed a latch since our previous snapshot.
+      $watchState = Get-DreamSkinAutostartRestartState -StateRoot $StateRoot
       $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
       if ($now - $lastInstallProbe -ge $installProbeInterval) {
         $installs = @(Get-DreamSkinRegisteredCodexInstalls)
@@ -171,8 +169,8 @@ try {
             $closingInventory = Get-DreamSkinAutostartInventory -Installs $installs
             if ($closingInventory.MainCount -eq 0) {
               $watchState = @{ RestartLatched = $false; LastAttemptAt = 0 }
-              Save-DreamSkinAutostartState
-              $closeObservation = @{ SeenMain = $false; ClosedSince = 0 }
+              Write-DreamSkinAutostartRestartState -StateRoot $StateRoot -State $watchState
+              $closeObservation = @{ ClosedSince = 0 }
             } else { $closeObservation.ClosedSince = 0 }
           } finally { if ($null -ne $closeLock) { Exit-DreamSkinOperationLock -Mutex $closeLock } }
         }
@@ -202,12 +200,19 @@ try {
           # its operation lock immediately before requesting a graceful close.
           $arguments += @('-AutoRestartIdleOnly', '-ExpectedCodexPid', "$($main.Process.ProcessId)",
             '-ExpectedCodexStartedAt', $startedAt)
-          $watchState.RestartLatched = $true
         }
-        $watchState.LastAttemptAt = $now
-        Save-DreamSkinAutostartState
+        # Dispatch is not a restart. Refusal by a busy operation, new task, or
+        # revoked consent must leave only the retry cooldown, never a latch.
+        $reservation = Reserve-DreamSkinAutostartAttempt -StateRoot $StateRoot -Snapshot $snapshot `
+          -NowMs ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
+        $watchState = $reservation.State
+        if (-not $reservation.Granted) {
+          Write-DreamSkinAutostartReason $reservation.Decision.Reason
+          continue
+        }
         Write-DreamSkinAutostartReason ($decision.Action + '-started')
         $result = Invoke-DreamSkinNative -FilePath $shellPath -ArgumentList $arguments
+        $watchState = Get-DreamSkinAutostartRestartState -StateRoot $StateRoot
         Write-DreamSkinAutostartReason ($decision.Action + '-exit-' + $result.ExitCode)
       } else {
         Write-DreamSkinAutostartReason $decision.Reason

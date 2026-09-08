@@ -29,6 +29,7 @@
 - Theme center: import an image, GIF, video and ZIP; switch themes; restore native appearance; change settings and reopen the center. Verify persisted selection and settings, one media layer, and no periodic theme reapplication while healthy.
 - Library: migrate both legacy and v2 themes, cancel a folder picker, disconnect a custom library, and inject copy/activation failures. Never remove the only valid source copy. Deleting a selected theme must activate a valid fallback first and remain recoverable from the library archive.
 - Automatic startup: closed Codex stays closed; active/unknown tasks and withdrawn consent prohibit automatic restart. Simulate WMI failure, package-path changes, corrupt restart history and PID reuse. These must not clear restart history or close a running app. A debug endpoint outage must not trigger a plain-launch correction.
+- Restart history: a fresh observer can clear a previous latch only after ten seconds of confirmed closure, an exclusive operation lock and a fresh empty inventory. A refusal before the worker requests a close must not permanently latch; an attempted close followed by failure must remain latched. A stale observer must not overwrite the worker's durable latch.
 
 ## Visual checks
 

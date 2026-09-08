@@ -115,21 +115,51 @@ test("rejects regular-file replacement between path inspection and handle open",
 
 test("rejects a parent replaced after reading even when the original file handle stays stable", async (t) => {
   const root = await fixture(t);
-  const media = path.join(root, "media");
+  const replacementRoot = await fixture(t);
+  const media = path.join(await fs.realpath(root), "media");
+  const lstat = fs.lstat.bind(fs);
   const open = fs.open.bind(fs);
+  const rootBefore = await lstat(root, { bigint: true });
+  const fileBefore = await lstat(path.join(media, "visual.mp4"), { bigint: true });
+  const parentBefore = await lstat(media, { bigint: true });
+  const replacementParent = await lstat(path.join(replacementRoot, "media"), { bigint: true });
+  assert.notEqual(parentBefore.ino, replacementParent.ino);
+  let readFinished = false;
+  let handleAfterRead;
+
+  // Windows can lock the parent of an open file against rename. Model just
+  // that parent's changed identity using another real directory's metadata;
+  // keep the real read, file handle, root, realpath, and leaf identity intact.
+  // This also isolates the parent-chain check from root/file-change guards.
+  t.mock.method(fs, "lstat", async (candidate, ...args) => {
+    const stat = await lstat(candidate, ...args);
+    if (readFinished && path.relative(media, path.resolve(candidate)) === "") {
+      return replacementParent;
+    }
+    return stat;
+  });
   t.mock.method(fs, "open", async (...args) => {
     const handle = await open(...args);
     const readFile = handle.readFile.bind(handle);
     handle.readFile = async (...readArgs) => {
       const bytes = await readFile(...readArgs);
-      await fs.rename(media, path.join(root, "original-media"));
-      await fs.mkdir(media);
-      await fs.writeFile(path.join(media, "visual.mp4"), "replacement after read\n");
+      handleAfterRead = await handle.stat({ bigint: true });
+      readFinished = true;
       return bytes;
     };
     return handle;
   });
-  await assert.rejects(() => buildContentManifest(root, ["media/visual.mp4"]), /changed|identity/i);
+  await assert.rejects(() => buildContentManifest(root, ["media/visual.mp4"]), {
+    message: "media/visual.mp4 changed while its content identity was computed",
+  });
+  assert.equal(readFinished, true);
+  const rootAfter = await lstat(root, { bigint: true });
+  const fileAfter = await lstat(path.join(media, "visual.mp4"), { bigint: true });
+  for (const field of ["dev", "ino", "mode", "size", "mtimeNs", "ctimeNs"]) {
+    assert.equal(rootAfter[field], rootBefore[field], `root ${field} must stay stable`);
+    assert.equal(fileAfter[field], fileBefore[field], `leaf ${field} must stay stable`);
+    assert.equal(handleAfterRead[field], fileBefore[field], `open handle ${field} must stay stable`);
+  }
 });
 
 test("writes the manifest once and detects immutable collisions", async (t) => {
