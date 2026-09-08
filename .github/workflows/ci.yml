@@ -61,6 +61,8 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
+      - name: Verify generated runtime assets after Windows checkout
+        run: node tools/sync-runtime-assets.mjs --check
       - name: Run Windows and portable regressions
         shell: cmd
         run: ${{ matrix.shell }} -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File .\windows\tests\run-tests.ps1

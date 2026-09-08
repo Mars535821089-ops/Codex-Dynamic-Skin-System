@@ -20,6 +20,14 @@ const expectedModules = ["module-registry.js", "media-layer.js", "audio-bus.js",
   "controller.js", "entry.js"];
 const manifestName = "dynamic-runtime-manifest.json";
 
+test("generated session activity source and output retain LF on Windows checkout", async () => {
+  const attributes = (await fs.readFile(path.join(projectRoot, ".gitattributes"), "utf8"))
+    .split(/\r?\n/).map((line) => line.trim());
+  for (const file of ["macos/scripts/dream-skin-autostart.mjs", "windows/scripts/session-activity.mjs"]) {
+    assert.ok(attributes.includes(`${file} text eol=lf`), `${file} needs byte-stable checkout attributes`);
+  }
+});
+
 function sha256(text) {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }

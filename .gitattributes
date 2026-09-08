@@ -24,6 +24,8 @@ macos/scripts/image-metadata.mjs text eol=lf
 windows/scripts/image-metadata.mjs text eol=lf
 macos/scripts/validate-safe-css-file.mjs text eol=lf
 windows/scripts/validate-safe-css-file.mjs text eol=lf
+macos/scripts/dream-skin-autostart.mjs text eol=lf
+windows/scripts/session-activity.mjs text eol=lf
 
 # Keep artwork out of text normalization and text diffs.
 *.png binary

@@ -190,7 +190,15 @@ function Write-TestOfficialThemePack {
 }
 
 function New-TestZipFromDirectory {
-  param([Parameter(Mandatory = $true)][string]$Source, [Parameter(Mandatory = $true)][string]$Archive)
+  param(
+    [Parameter(Mandatory = $true)][string]$Source,
+    [Parameter(Mandatory = $true)][string]$Archive,
+    [string]$AttributeEntryName,
+    [Nullable[int]]$ExternalAttributes = $null
+  )
+  if ([bool]$AttributeEntryName -ne ($null -ne $ExternalAttributes)) {
+    throw 'A ZIP fixture attribute override requires an entry name and attributes together.'
+  }
   if (Test-Path -LiteralPath $Archive) { Remove-Item -LiteralPath $Archive -Force }
   $archiveStream = [System.IO.File]::Open($Archive, [System.IO.FileMode]::CreateNew)
   $zip = [System.IO.Compression.ZipArchive]::new(
@@ -205,6 +213,9 @@ function New-TestZipFromDirectory {
       # the same portable archive contract enforced for public theme packs.
       $relative = $sourceFile.FullName.Substring($Source.Length).TrimStart('\', '/').Replace('\', '/')
       $entry = $zip.CreateEntry($relative, [System.IO.Compression.CompressionLevel]::Optimal)
+      if ($relative -ceq $AttributeEntryName) {
+        $entry.ExternalAttributes = [int]$ExternalAttributes
+      }
       $input = $sourceFile.OpenRead()
       $output = $entry.Open()
       try { $input.CopyTo($output) } finally { $output.Dispose(); $input.Dispose() }
@@ -212,6 +223,31 @@ function New-TestZipFromDirectory {
   } finally {
     $zip.Dispose()
     $archiveStream.Dispose()
+  }
+  if ($AttributeEntryName) {
+    Assert-TestZipEntryAttributes -Archive $Archive -EntryName $AttributeEntryName `
+      -ExpectedAttributes $ExternalAttributes
+  }
+}
+
+function Assert-TestZipEntryAttributes {
+  param(
+    [Parameter(Mandatory = $true)][string]$Archive,
+    [Parameter(Mandatory = $true)][string]$EntryName,
+    [Parameter(Mandatory = $true)][int]$ExpectedAttributes
+  )
+  $stream = [System.IO.File]::OpenRead($Archive)
+  $zip = [System.IO.Compression.ZipArchive]::new(
+    $stream, [System.IO.Compression.ZipArchiveMode]::Read, $false
+  )
+  try {
+    $entry = $zip.GetEntry($EntryName)
+    if ($null -eq $entry -or [int]$entry.ExternalAttributes -ne $ExpectedAttributes) {
+      throw "ZIP fixture did not persist the requested entry attributes: $EntryName"
+    }
+  } finally {
+    $zip.Dispose()
+    $stream.Dispose()
   }
 }
 
@@ -230,12 +266,17 @@ function New-TestZipWithEntry {
   )
   try {
     $entry = $zip.CreateEntry($EntryName)
-    if ($null -ne $ExternalAttributes) { $entry.ExternalAttributes = $ExternalAttributes.Value }
+    # PowerShell boxes a non-null Nullable[int] as Int32, so .Value is null.
+    if ($null -ne $ExternalAttributes) { $entry.ExternalAttributes = [int]$ExternalAttributes }
     $writer = [System.IO.StreamWriter]::new($entry.Open(), [System.Text.UTF8Encoding]::new($false))
     try { $writer.Write($Content) } finally { $writer.Dispose() }
   } finally {
     $zip.Dispose()
     $stream.Dispose()
+  }
+  if ($null -ne $ExternalAttributes) {
+    Assert-TestZipEntryAttributes -Archive $Archive -EntryName $EntryName `
+      -ExpectedAttributes $ExternalAttributes
   }
 }
 
@@ -1305,20 +1346,33 @@ try {
     Assert-TestImportRejected -Archive $reservedAliasArchive -Label $reservedAlias.Token
   }
 
+  # Both hostile archives are complete, otherwise valid themes. Prove the
+  # identical payload imports before changing only the entry-type metadata.
+  $entryTypeSource = Join-Path $temporaryRoot 'entry-type-source'
+  $entryTypeControlArchive = Join-Path $temporaryRoot 'entry-type-control.zip'
+  Write-TestThemePack -Directory $entryTypeSource -Id 'entry-type-fixture' -Name 'Entry Type Fixture'
+  New-TestZipFromDirectory -Source $entryTypeSource -Archive $entryTypeControlArchive
+  $entryTypeControl = Import-DreamSkinThemeZip -ArchivePath $entryTypeControlArchive -StateRoot $stateRoot
+  if ($entryTypeControl.Status -cne 'Imported' -or $entryTypeControl.Id -cne 'entry-type-fixture') {
+    throw 'The ordinary-file control for linked ZIP entries was not a valid theme.'
+  }
+
   $linkArchive = Join-Path $temporaryRoot 'link.zip'
   $linkAttributes = [System.BitConverter]::ToInt32(
     [System.BitConverter]::GetBytes([Convert]::ToUInt32('A1FF0000', 16)), 0
   )
-  New-TestZipWithEntry -Archive $linkArchive -EntryName 'background.jpg' `
-    -Content 'outside-target' -ExternalAttributes $linkAttributes
+  New-TestZipFromDirectory -Source $entryTypeSource -Archive $linkArchive `
+    -AttributeEntryName 'background.jpg' -ExternalAttributes $linkAttributes
+  Assert-TestExpansionRejectedWithoutWrites -Archive $linkArchive -Label 'Unix symbolic link'
   Assert-TestImportRejected -Archive $linkArchive -Label 'Unix symbolic link'
 
   $reparseArchive = Join-Path $temporaryRoot 'reparse.zip'
   $reparseAttributes = [System.BitConverter]::ToInt32(
     [System.BitConverter]::GetBytes([Convert]::ToUInt32('81A40400', 16)), 0
   )
-  New-TestZipWithEntry -Archive $reparseArchive -EntryName 'background.jpg' `
-    -Content 'reparse-target' -ExternalAttributes $reparseAttributes
+  New-TestZipFromDirectory -Source $entryTypeSource -Archive $reparseArchive `
+    -AttributeEntryName 'background.jpg' -ExternalAttributes $reparseAttributes
+  Assert-TestExpansionRejectedWithoutWrites -Archive $reparseArchive -Label 'Windows reparse entry'
   Assert-TestImportRejected -Archive $reparseArchive -Label 'Windows reparse entry'
 
   $nestedArchive = Join-Path $temporaryRoot 'nested.zip'

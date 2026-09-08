@@ -5,11 +5,22 @@ import test from "node:test";
 // Exercise the real watcher transaction without opening a CDP socket or app.
 // Only its native renderer/persistence boundaries are replaced by this harness.
 const source = await fs.readFile(new URL("../scripts/injector.mjs", import.meta.url), "utf8");
-const start = source.indexOf("  const refreshPayload = async ");
-const end = source.indexOf("  const libraryController = ", start);
-assert.ok(start >= 0 && end > start, "The real watcher refresh transaction must remain covered");
+function extractWatcherSource(rawSource) {
+  // Normalize checkout line endings only; execute the real source unchanged
+  // otherwise, and keep all extraction boundaries mandatory.
+  const source = rawSource.replace(/\r\n/g, "\n");
+  const start = source.indexOf("  const refreshPayload = async ");
+  const end = source.indexOf("  const libraryController = ", start);
+  assert.ok(start >= 0 && end > start, "The real watcher refresh transaction must remain covered");
+  const watchStart = source.indexOf("  const applyExternalSelection = async ");
+  const watchEnd = source.indexOf("  try {\n    loadedPayload = ", watchStart);
+  assert.ok(watchStart >= 0 && watchEnd > watchStart, "The real watcher retry gates must remain covered");
+  return { refresh: source.slice(start, end), watcher: source.slice(watchStart, watchEnd) };
+}
+const extracted = extractWatcherSource(source);
 
-function fixture({ releaseOldFails = false, failVerificationAt = null, failSelection = false } = {}) {
+function fixture({ releaseOldFails = false, failVerificationAt = null, failSelection = false,
+  script = extracted.refresh } = {}) {
   const events = [];
   const oldAssets = { released: false, async release() {
     this.released = true; events.push("release-old");
@@ -38,7 +49,7 @@ function fixture({ releaseOldFails = false, failVerificationAt = null, failSelec
     removeEarlyPayload: async (_session, identifier) => events.push(`remove-${identifier}`),
     fallbackTargets: new Map(), console: { log() {}, warn() {}, error() {} },
   };
-  const refresh = new Function("state", `with (state) { ${source.slice(start, end)}; return refreshPayload; }`)(state);
+  const refresh = new Function("state", `with (state) { ${script}; return refreshPayload; }`)(state);
   return { state, previous, next, oldAssets, newAssets, events,
     refresh: () => refresh("/new", "transaction-test", "theme", next) };
 }
@@ -90,11 +101,7 @@ test("selection persistence failure restores renderer state and preserves old ea
   }
 });
 
-const watchStart = source.indexOf("  const applyExternalSelection = async ");
-const watchEnd = source.indexOf("  try {\n    loadedPayload = ", watchStart);
-assert.ok(watchStart >= 0 && watchEnd > watchStart, "The real watcher retry gates must remain covered");
-
-function watchFixture() {
+function watchFixture(script = extracted.watcher) {
   const calls = { selectionReads: 0, loads: 0, refreshes: 0, releases: 0, stamps: 0 };
   const state = {
     selectionFile: "/selection", displayMode: "theme", selectedThemeDir: "/old",
@@ -125,7 +132,7 @@ function watchFixture() {
   state.loadWatchedPayload = load;
   state.loadPayload = load;
   state.dynamicRuntimeForOptions = () => ({});
-  const watcher = new Function("state", `with (state) { ${source.slice(watchStart, watchEnd)};
+  const watcher = new Function("state", `with (state) { ${script};
     return { applyExternalSelection, auditThemeSource }; }`)(state);
   return { state, calls, ...watcher };
 }
@@ -223,4 +230,33 @@ test("source loader failures receive the same bounded retry interval before a fi
   assert.equal(f.calls.loads, 2);
   assert.equal(f.calls.refreshes, 1);
   assert.equal(f.state.nextSourceRetryAt, 0);
+});
+
+test("CRLF checkout still exercises the real refresh transaction and keeps committed assets active", async () => {
+  const crlfSource = source.replace(/\r?\n/g, "\r\n");
+  assert.match(crlfSource, /\r\n/);
+  const fragments = extractWatcherSource(crlfSource);
+  const f = fixture({ script: fragments.refresh, releaseOldFails: true });
+  await f.refresh();
+  assert.equal(f.state.loadedPayload, f.next);
+  assert.equal(f.state.persisted, "local.test.new");
+  assert.equal(f.newAssets.released, false);
+  assert.equal(f.events.includes("render-r1-old"), false);
+});
+
+test("CRLF checkout still executes real selection and source retry gates", async () => {
+  const fragments = extractWatcherSource(source.replace(/\r?\n/g, "\r\n"));
+  const selection = watchFixture(fragments.watcher);
+  await assert.rejects(selection.applyExternalSelection, /verification rejected/);
+  await selection.applyExternalSelection();
+  assert.equal(selection.calls.refreshes, 1);
+  assert.equal(selection.state.loadedPayload.revision, "old");
+
+  const audit = watchFixture(fragments.watcher);
+  await assert.rejects(() => audit.auditThemeSource(1000), /verification rejected/);
+  await audit.auditThemeSource(2000);
+  await audit.auditThemeSource(31000);
+  assert.equal(audit.calls.refreshes, 1);
+  assert.equal(audit.calls.loads, 2);
+  assert.equal(audit.state.nextSourceRetryAt, 61000);
 });
