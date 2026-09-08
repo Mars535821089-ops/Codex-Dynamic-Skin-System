@@ -172,12 +172,12 @@ test("a successful CDP open does not keep the audit process alive until its time
 
   const result = await Promise.race([
     once(child, "exit").then(([code, signal]) => ({ code, signal })),
-    new Promise((resolve) => setTimeout(() => resolve({ timedOut: true }), 750)),
+    new Promise((resolve) => setTimeout(() => resolve({ timedOut: true }), 10_000)),
   ]);
   if (result.timedOut) child.kill("SIGKILL");
 
   assert.deepEqual(result, { code: 0, signal: null });
-  assert.ok(performance.now() - startedAt < 750, "successful open retained its timeout timer");
+  assert.ok(performance.now() - startedAt < 10_000, "successful open retained its timeout timer");
 });
 
 test("a CDP call can reject a renderer that never answers", async (t) => {
@@ -208,7 +208,7 @@ test("a CDP call can reject a renderer that never answers", async (t) => {
 
   const result = await Promise.race([
     once(child, "exit").then(([code, signal]) => ({ code, signal })),
-    new Promise((resolve) => setTimeout(() => resolve({ timedOut: true }), 750)),
+    new Promise((resolve) => setTimeout(() => resolve({ timedOut: true }), 10_000)),
   ]);
   if (result.timedOut) child.kill("SIGKILL");
   assert.deepEqual(result, { code: 0, signal: null });

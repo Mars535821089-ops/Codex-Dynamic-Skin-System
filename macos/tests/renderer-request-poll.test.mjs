@@ -30,19 +30,16 @@ test("theme and action requests are read in one bounded renderer evaluation", as
   assert.equal(result.actionRequest.action, "save-settings");
 });
 
-test("the watcher uses bounded integrity checks and coalesced recovery thresholds", () => {
+test("the watcher separates confirmed ownership loss from transport backoff", () => {
   assert.match(
     injectorSource,
-    /verifyLoadedSessionOnce\(record\.session, current, 1500\)[\s\S]*record\.healthFailureCount < 2[\s\S]*record\.recoveryQueue\.request\("health-check"\)/,
+    /probeLoadedThemeOwnership\(record\.session, current, 1000\)[\s\S]*nextOwnershipProbeState\(record\.ownershipProbeState, outcome\)[\s\S]*record\.ownershipProbeState\.recover[\s\S]*record\.recoveryQueue\.request\("health-check"\)/,
   );
   assert.match(
     injectorSource,
-    /pollRendererRequests\(record\.session, 1500\)[\s\S]*record\.pollFailureCount >= 3[\s\S]*record\.recoveryQueue\.request\("request-poll-failed"\)/,
+    /pollRendererRequests\(record\.session, 1500\)[\s\S]*nextRequestPollState\(record\.requestPollState, "transport-error"\)[\s\S]*record\.nextRequestPollAt = pollNow \+ record\.requestPollState\.delayMs/,
   );
-  assert.match(
-    injectorSource,
-    /record\.nextHealthCheckAt = healthNow \+ 4000/,
-  );
+  assert.doesNotMatch(injectorSource, /recoveryQueue\.request\("request-poll-failed"\)/);
 });
 
 test("renderer recovery cannot commit a stale theme generation", () => {

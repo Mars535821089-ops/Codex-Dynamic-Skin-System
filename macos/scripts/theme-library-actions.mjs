@@ -53,6 +53,53 @@ function extensionFor(info) {
   return ({ jpeg: ".jpg", png: ".png", webp: ".webp", gif: ".gif", mp4: ".mp4", webm: ".webm" })[info.container];
 }
 
+export function shouldNormalizeImportedVideo(info) {
+  if (info?.family !== "video") return false;
+  const width = Number(info.width) || 0;
+  const height = Number(info.height) || 0;
+  const longEdge = Math.max(width, height);
+  const shortEdge = Math.min(width, height);
+  const fps = Number(info.fps) || 0;
+  return longEdge > 1280 || shortEdge > 720 || fps > 24.5;
+}
+
+function normalizedVideoDimensions(info) {
+  const width = Math.max(2, Number(info.width) || 1280);
+  const height = Math.max(2, Number(info.height) || 720);
+  const scale = Math.min(1, 1280 / Math.max(width, height), 720 / Math.min(width, height));
+  return {
+    width: Math.max(2, Math.floor((width * scale) / 2) * 2),
+    height: Math.max(2, Math.floor((height * scale) / 2) * 2),
+  };
+}
+
+async function findFfmpeg() {
+  const candidates = ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"];
+  for (const candidate of candidates) {
+    if (await fs.access(candidate, fsConstants.X_OK).then(() => true).catch(() => false)) return candidate;
+  }
+  throw new Error(
+    "This video exceeds 1280x720 or 24fps. Install ffmpeg, then import it again.",
+  );
+}
+
+export async function optimizeImportedVideo(sourcePath, outputPath, info) {
+  const ffmpeg = await findFfmpeg();
+  const target = normalizedVideoDimensions(info);
+  const filters = [`scale=${target.width}:${target.height}`];
+  if ((Number(info?.fps) || 0) > 24.5) filters.push("fps=24");
+  const args = [
+    "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", sourcePath,
+    "-map", "0:v:0", "-map", "0:a?", "-vf", filters.join(","),
+    "-c:v", "libx264", "-preset", "medium", "-crf", "23", "-pix_fmt", "yuv420p",
+    "-movflags", "+faststart",
+  ];
+  if (info?.hasAudio) args.push("-c:a", "aac", "-b:a", "160k");
+  else args.push("-an");
+  args.push(outputPath);
+  await execFileAsync(ffmpeg, args, { timeout: 15 * 60_000, maxBuffer: 4 * 1024 * 1024 });
+}
+
 function themeDefinition({ id, name, info, visualAsset }) {
   const visual = info.family === "video" ? {
     kind: "video", asset: visualAsset, poster: "media/poster.png",
@@ -118,13 +165,15 @@ export async function importMediaTheme({
   sourcePath,
   themeName,
   createPoster = createQuickLookPoster,
+  inspectMedia = inspectMediaFile,
+  optimizeVideo = optimizeImportedVideo,
 }) {
   const root = await trustedLibraryRoot(libraryRoot);
   const sourceExtension = path.extname(sourcePath).toLowerCase();
   const requestedRole = [".png", ".jpg", ".jpeg", ".webp", ".gif"].includes(sourceExtension)
     ? "image" : [".mp4", ".webm"].includes(sourceExtension) ? "video" : null;
   if (!requestedRole) throw new Error(`Unsupported imported media extension ${sourceExtension || "<none>"}`);
-  const info = await inspectMediaFile(sourcePath, { role: requestedRole });
+  const info = await inspectMedia(sourcePath, { role: requestedRole });
   if (!new Set(["image", "video"]).has(info.family)) throw new Error("Imported media must be an image or video");
   const extension = extensionFor(info);
   if (!extension) throw new Error(`Unsupported imported media container ${info.container}`);
@@ -142,15 +191,35 @@ export async function importMediaTheme({
   const stage = path.join(root, `.import-${process.pid}-${randomBytes(6).toString("hex")}`);
   try {
     await fs.mkdir(path.join(stage, "media"), { recursive: true, mode: 0o700 });
-    const visualAsset = `media/visual${extension}`;
-    const stagedVisualPath = path.join(stage, "media", `visual${extension}`);
-    await fs.writeFile(stagedVisualPath, bytes, { flag: "wx", mode: 0o600 });
-    if (info.family === "video") {
+    let finalInfo = info;
+    let optimized = false;
+    let visualExtension = extension;
+    let stagedVisualPath;
+    if (shouldNormalizeImportedVideo(info)) {
+      const stagedSourcePath = path.join(stage, "media", `source${extension}`);
+      stagedVisualPath = path.join(stage, "media", "visual.mp4");
+      await fs.writeFile(stagedSourcePath, bytes, { flag: "wx", mode: 0o600 });
+      await optimizeVideo(stagedSourcePath, stagedVisualPath, info);
+      finalInfo = await inspectMedia(stagedVisualPath, { role: "video" });
+      if (finalInfo.family !== "video" || finalInfo.container !== "mp4"
+        || shouldNormalizeImportedVideo(finalInfo)) {
+        throw new Error("Optimized video still exceeds the 1280x720/24fps playback limit");
+      }
+      await fs.rm(stagedSourcePath, { force: true });
+      visualExtension = ".mp4";
+      optimized = true;
+    } else {
+      stagedVisualPath = path.join(stage, "media", `visual${extension}`);
+      await fs.writeFile(stagedVisualPath, bytes, { flag: "wx", mode: 0o600 });
+    }
+    const visualAsset = `media/visual${visualExtension}`;
+    if (finalInfo.family === "video") {
       const posterPath = path.join(stage, "media", "poster.png");
       await createPoster(stagedVisualPath, posterPath);
-      await inspectMediaFile(posterPath, { role: "poster" });
+      await inspectMedia(posterPath, { role: "poster" });
     }
-    const theme = themeDefinition({ id: themeId, name: cleanThemeName(themeName, sourcePath), info, visualAsset });
+    const theme = themeDefinition({ id: themeId, name: cleanThemeName(themeName, sourcePath),
+      info: finalInfo, visualAsset });
     await fs.writeFile(path.join(stage, "theme.json"), `${JSON.stringify(theme, null, 2)}\n`, { flag: "wx", mode: 0o600 });
     const loaded = await loadInstalledSkin(stage, { platform: "macos", clientVersion: "2.0.0" });
     if (loaded.sourceApiVersion !== 2 || loaded.theme.id !== themeId) throw new Error("Imported theme validation failed");
@@ -171,7 +240,7 @@ export async function importMediaTheme({
       await fs.rm(stage, { recursive: true, force: true });
       return { themeId, themeDir: finalDir, duplicate: true, media: info };
     }
-    return { themeId, themeDir: finalDir, duplicate: false, media: info,
+    return { themeId, themeDir: finalDir, duplicate: false, media: finalInfo, optimized,
       versionId: contentManifest.versionId };
   } catch (error) {
     await fs.rm(stage, { recursive: true, force: true });

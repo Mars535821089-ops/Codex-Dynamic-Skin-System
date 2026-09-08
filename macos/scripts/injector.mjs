@@ -399,6 +399,16 @@ export function shouldWaitForEarlyGeneration(reason, loaded) {
   return reason === "Page.loadEventFired" && Boolean(loaded?.dynamicRenderer);
 }
 
+export function shouldPresentConnectionOperation(initialOperation, recoveryOperation) {
+  return Boolean(initialOperation?.token || recoveryOperation?.token);
+}
+
+export function shouldPresentRefreshOperation(reason, externalOperation) {
+  return Boolean(externalOperation?.token)
+    || reason === "renderer-request"
+    || reason === "settings-and-theme-save";
+}
+
 export function earlyGenerationWaitOptions(reason) {
   return reason === "Page.loadEventFired"
     ? { timeoutMs: 1250, pollMs: 50 }
@@ -1768,6 +1778,91 @@ export async function pollRendererRequests(session, timeoutMs = 1500) {
   })()`, timeoutMs);
 }
 
+const OWNERSHIP_PROBE_INTERVAL_MS = 10_000;
+const REQUEST_POLL_INTERVAL_MS = 2_000;
+const TRANSPORT_BACKOFF_LIMIT_MS = 30_000;
+const STEADY_STATE_WATCH_DELAY_MS = 2_000;
+
+function exponentialBackoff(baseMs, failureCount) {
+  return Math.min(TRANSPORT_BACKOFF_LIMIT_MS, baseMs * (2 ** Math.max(0, failureCount - 1)));
+}
+
+export function nextDiscoveryPollState(previous = {}, outcome) {
+  if (outcome === "healthy") return { transportFailures: 0, delayMs: 100 };
+  if (outcome === "transport-error") {
+    const transportFailures = (previous.transportFailures ?? 0) + 1;
+    return { transportFailures, delayMs: exponentialBackoff(1_000, transportFailures) };
+  }
+  throw new TypeError(`Unsupported renderer discovery outcome: ${outcome}`);
+}
+
+export function steadyStateWatchDelay(sessionCount, targetCount) {
+  return sessionCount > 0 ? STEADY_STATE_WATCH_DELAY_MS : (targetCount > 0 ? 250 : 100);
+}
+
+export function nextOwnershipProbeState(previous = {}, outcome) {
+  if (outcome === "healthy") {
+    return { ownershipFailures: 0, transportFailures: 0, recover: false,
+      delayMs: OWNERSHIP_PROBE_INTERVAL_MS };
+  }
+  if (outcome === "transport-error") {
+    const transportFailures = (previous.transportFailures ?? 0) + 1;
+    return { ownershipFailures: 0, transportFailures, recover: false,
+      delayMs: exponentialBackoff(5_000, transportFailures) };
+  }
+  if (outcome === "ownership-mismatch") {
+    const ownershipFailures = (previous.ownershipFailures ?? 0) + 1;
+    const recover = ownershipFailures >= 2;
+    return { ownershipFailures: recover ? 0 : ownershipFailures, transportFailures: 0, recover,
+      delayMs: recover ? OWNERSHIP_PROBE_INTERVAL_MS : 5_000 };
+  }
+  throw new TypeError(`Unsupported ownership probe outcome: ${outcome}`);
+}
+
+export function nextRequestPollState(previous = {}, outcome) {
+  if (outcome === "healthy") {
+    return { transportFailures: 0, recover: false, delayMs: REQUEST_POLL_INTERVAL_MS };
+  }
+  if (outcome === "transport-error") {
+    const transportFailures = (previous.transportFailures ?? 0) + 1;
+    return { transportFailures, recover: false,
+      delayMs: exponentialBackoff(3_000, transportFailures) };
+  }
+  throw new TypeError(`Unsupported renderer request poll outcome: ${outcome}`);
+}
+
+export async function probeLoadedThemeOwnership(session, loaded, timeoutMs = 1000) {
+  if (loaded?.displayMode === "native") {
+    return verifyNativeControlSession(session, loaded.revision, timeoutMs);
+  }
+  return session.evaluate(`(() => {
+    const runtime = window.__CODEX_DREAM_SKIN_STATE__;
+    const roots = [...document.querySelectorAll("[data-dynamic-skin-root]")];
+    const visibility = document.visibilityState || "visible";
+    const stylePresent = runtime?.styleMode === "adopted"
+      ? Boolean(runtime?.styleSheet && document.adoptedStyleSheets?.includes(runtime.styleSheet))
+      : Boolean(runtime?.styleNode && document.getElementById("codex-dream-skin-style") === runtime.styleNode);
+    const visibleRoots = visibility === "hidden" ? roots.length : roots.filter((root) =>
+      root?.isConnected !== false && root?.style?.display !== "none"
+      && root?.style?.visibility !== "hidden" && root?.style?.opacity !== "0").length;
+    return {
+      ownershipProbe: true,
+      installed: document.documentElement.getAttribute("data-dream-skin") === "active",
+      version: runtime?.version ?? null,
+      stylePresent,
+      themeId: runtime?.themeId ?? null,
+      revision: runtime?.revision ?? null,
+      documentVisibility: visibility,
+      dynamic: {
+        activation: runtime?.dynamic?.activation ?? null,
+        diagnostics: { phase: runtime?.dynamic?.activation ?? null },
+      },
+      dynamicRootCount: roots.length,
+      dynamicVisibleRootCount: visibleRoots,
+    };
+  })()`, timeoutMs);
+}
+
 async function verifyRemovedSession(session) {
   return session.evaluate(`(() => {
     const root = document.documentElement;
@@ -2076,6 +2171,7 @@ async function waitForLoadedSession(
 
 export function isLoadedThemeOwnershipHealthy(verification, loaded) {
   if (loaded?.displayMode === "native") return verification?.pass === true;
+  const lightweightOwnershipProbe = verification?.ownershipProbe === true;
   const dynamicHealthy = loaded?.sourceApiVersion !== 2 || (
     verification?.dynamic?.activation === "active"
     && verification?.dynamic?.diagnostics?.phase === "active"
@@ -2087,12 +2183,16 @@ export function isLoadedThemeOwnershipHealthy(verification, loaded) {
     verification?.installed
     && verification?.version === SKIN_VERSION
     && verification?.stylePresent
-    && verification?.businessClassPollution === 0
+    && (lightweightOwnershipProbe || verification?.businessClassPollution === 0)
     && verification?.themeId === loaded?.theme?.id
     && verification?.revision === loaded?.revision
-    && verification?.documentOverflow?.x === false
+    && (lightweightOwnershipProbe || verification?.documentOverflow?.x === false)
     && dynamicHealthy
   );
+}
+
+export function shouldAdoptLoadedTheme(verification, loaded) {
+  return isLoadedThemeOwnershipHealthy(verification, loaded);
 }
 
 async function waitForLoadedOwnershipSession(
@@ -2618,7 +2718,7 @@ async function runOwnedWatch(options) {
       console.error(`[dream-skin] requested theme switch failed: ${error.message}`);
     },
   });
-  let discoveryDelayMs = 100;
+  let discoveryPollState = { transportFailures: 0, delayMs: 100 };
   let lastListErrorAt = 0;
   let operationSignalChain = Promise.resolve();
   let activeOperation = null;
@@ -2777,15 +2877,19 @@ async function runOwnedWatch(options) {
       await Promise.all([...sessions.values()].map(async (record) => {
         if (record.session.closed || !record.ready) return;
         const externalOperation = activeOperation;
-        const operationToken = externalOperation?.token ?? nextOperationToken();
+        const presentRefreshOperation = shouldPresentRefreshOperation(reason, externalOperation);
+        const operationToken = externalOperation?.token
+          ?? (presentRefreshOperation ? nextOperationToken() : null);
         record.operationToken = operationToken;
         record.operationExternal = Boolean(externalOperation);
-        await presentOperationUi(
-          record.session,
-          operationToken,
-          externalOperation ? "loading" : "error",
-          externalOperation ? "正在准备主题…" : "主题读取失败，当前皮肤未改变",
-        );
+        if (presentRefreshOperation) {
+          await presentOperationUi(
+            record.session,
+            operationToken,
+            externalOperation ? "loading" : "error",
+            externalOperation ? "正在准备主题…" : "主题读取失败，当前皮肤未改变",
+          );
+        }
       }));
       throw error;
     }
@@ -2812,18 +2916,24 @@ async function runOwnedWatch(options) {
       if (session.closed || !record.ready) continue;
       eligible += 1;
       const externalOperation = activeOperation;
-      const operationToken = externalOperation?.token ?? nextOperationToken();
+      const presentRefreshOperation = shouldPresentRefreshOperation(reason, externalOperation);
+      const operationToken = externalOperation?.token
+        ?? (presentRefreshOperation ? nextOperationToken() : null);
       record.operationToken = operationToken;
       record.operationExternal = Boolean(externalOperation);
       try {
-        await presentOperationUi(
-          session, operationToken, "loading", `正在应用「${next.theme.name}」…`,
-        );
+        if (presentRefreshOperation) {
+          await presentOperationUi(
+            session, operationToken, "loading", `正在应用「${next.theme.name}」…`,
+          );
+        }
         if (controlOnly || mutationEpoch !== refreshEpoch) continue;
         const nextIdentifier = await registerEarlyForRecord(
           record, next.payload, next.revision,
         );
-        attempts.push({ record, nextIdentifier, operationToken, externalOperation });
+        attempts.push({
+          record, nextIdentifier, operationToken, externalOperation, presentRefreshOperation,
+        });
         if (controlOnly || mutationEpoch !== refreshEpoch) {
           await removeEarlyIdentifier(record, nextIdentifier);
           continue;
@@ -2850,14 +2960,16 @@ async function runOwnedWatch(options) {
       }
     }
     if (committed) {
-      for (const { record, nextIdentifier, operationToken, externalOperation } of attempts) {
+      for (const {
+        record, nextIdentifier, operationToken, externalOperation, presentRefreshOperation,
+      } of attempts) {
         if (record.earlyScriptId && record.earlyScriptId !== nextIdentifier) {
           await removeEarlyIdentifier(record, record.earlyScriptId);
         }
         record.earlyScriptId = nextIdentifier;
         record.earlyRevision = nextIdentifier ? next.revision : null;
         record.needsLoadFallback = !nextIdentifier;
-        if (!externalOperation) {
+        if (presentRefreshOperation && !externalOperation) {
           await presentOperationUi(record.session, operationToken, "success", `已应用「${next.theme.name}」`);
         }
       }
@@ -2867,7 +2979,9 @@ async function runOwnedWatch(options) {
       watchSelectedTheme();
       await previous.assetGeneration?.release();
     } else {
-      for (const { record, nextIdentifier, operationToken, externalOperation } of attempts) {
+      for (const {
+        record, nextIdentifier, operationToken, externalOperation, presentRefreshOperation,
+      } of attempts) {
         await removeEarlyIdentifier(record, nextIdentifier);
         if (!record.session.closed) {
           try {
@@ -2881,7 +2995,7 @@ async function runOwnedWatch(options) {
             record.needsLoadFallback = true;
             console.error(`[dream-skin] theme rollback failed: ${rollbackError.message}`);
           }
-          if (!externalOperation) {
+          if (presentRefreshOperation && !externalOperation) {
             await presentOperationUi(record.session, operationToken, "error", "主题切换失败，已恢复原主题");
           }
         }
@@ -2909,7 +3023,8 @@ async function runOwnedWatch(options) {
     record.ready = false;
     record.lastThemeRequestSequence = 0;
     record.lastThemeActionRequestSequence = 0;
-    record.pollFailureCount = 0;
+    record.requestPollState = { transportFailures: 0 };
+    record.nextRequestPollAt = Date.now() + REQUEST_POLL_INTERVAL_MS;
     for (let recoveryAttempt = 0; recoveryAttempt < 3; recoveryAttempt += 1) {
       const loaded = current;
       let nextIdentifier = null;
@@ -2969,8 +3084,8 @@ async function runOwnedWatch(options) {
           }
         }
         record.needsLoadFallback = !record.earlyScriptId;
-        record.healthFailureCount = 0;
-        record.nextHealthCheckAt = Date.now() + 4000;
+        record.ownershipProbeState = { ownershipFailures: 0, transportFailures: 0 };
+        record.nextHealthCheckAt = Date.now() + OWNERSHIP_PROBE_INTERVAL_MS;
         record.ready = true;
         debugTrace("renderer-recovered", {
           targetId,
@@ -3302,14 +3417,14 @@ async function runOwnedWatch(options) {
       let targets = [];
       try {
         targets = await listAppTargets(options.port);
-        discoveryDelayMs = 100;
+        discoveryPollState = nextDiscoveryPollState(discoveryPollState, "healthy");
       } catch (error) {
         if (Date.now() - lastListErrorAt >= 2000) {
           console.error(`[dream-skin] ${new Date().toISOString()} ${error.message}`);
           lastListErrorAt = Date.now();
         }
-        await new Promise((resolve) => setTimeout(resolve, discoveryDelayMs));
-        discoveryDelayMs = Math.min(500, Math.round(discoveryDelayMs * 1.6));
+        discoveryPollState = nextDiscoveryPollState(discoveryPollState, "transport-error");
+        await new Promise((resolve) => setTimeout(resolve, discoveryPollState.delayMs));
         continue;
       }
 
@@ -3358,9 +3473,9 @@ async function runOwnedWatch(options) {
         for (const [id, record] of sessions) {
           if (record.session.closed || !record.ready || record.recoveryQueue?.pending()
             || healthNow < record.nextHealthCheckAt) continue;
-          record.nextHealthCheckAt = healthNow + 4000;
+          let outcome = "healthy";
           try {
-            const verification = await verifyLoadedSessionOnce(record.session, current, 1500);
+            const verification = await probeLoadedThemeOwnership(record.session, current, 1000);
             if (!isLoadedThemeOwnershipHealthy(verification, current)) {
               debugTrace("health-check-failed", {
                 targetId: id,
@@ -3377,13 +3492,15 @@ async function runOwnedWatch(options) {
                 dynamicRootCount: verification?.dynamicRootCount,
                 dynamicVisibleRootCount: verification?.dynamicVisibleRootCount,
               });
-              throw new Error("theme ownership verification failed");
+              outcome = "ownership-mismatch";
             }
-            record.healthFailureCount = 0;
-          } catch {
-            record.healthFailureCount += 1;
-            if (record.healthFailureCount < 2) continue;
-            record.healthFailureCount = 0;
+          } catch (error) {
+            outcome = "transport-error";
+            debugTrace("health-check-transport-error", { targetId: id, message: error.message });
+          }
+          record.ownershipProbeState = nextOwnershipProbeState(record.ownershipProbeState, outcome);
+          record.nextHealthCheckAt = healthNow + record.ownershipProbeState.delayMs;
+          if (record.ownershipProbeState.recover) {
             console.warn(`[dream-skin] renderer ${id} lost theme ownership; repairing in place`);
             if (record.recoveryQueue.request("health-check")) record.ready = false;
           }
@@ -3394,20 +3511,24 @@ async function runOwnedWatch(options) {
         const rendererRequests = [];
         const rendererActionRequests = [];
         for (const record of sessions.values()) {
-          if (record.session.closed || !record.ready) continue;
+          const pollNow = Date.now();
+          if (record.session.closed || !record.ready || pollNow < record.nextRequestPollAt) continue;
           let rendererPoll;
           try {
             rendererPoll = await pollRendererRequests(record.session, 1500);
-            record.pollFailureCount = 0;
-          } catch {
-            record.pollFailureCount += 1;
-            if (record.pollFailureCount >= 3) {
-              record.pollFailureCount = 0;
-              console.warn("[dream-skin] renderer request channel is unresponsive; reconnecting");
-              if (record.recoveryQueue.request("request-poll-failed")) record.ready = false;
-            }
+            record.requestPollState = nextRequestPollState(record.requestPollState, "healthy");
+          } catch (error) {
+            record.requestPollState = nextRequestPollState(record.requestPollState, "transport-error");
+            record.nextRequestPollAt = pollNow + record.requestPollState.delayMs;
+            debugTrace("request-poll-transport-error", {
+              targetId: record.session.target.id,
+              failures: record.requestPollState.transportFailures,
+              retryInMs: record.requestPollState.delayMs,
+              message: error.message,
+            });
             continue;
           }
+          record.nextRequestPollAt = pollNow + record.requestPollState.delayMs;
           const request = rendererPoll?.themeRequest ?? null;
           const validated = validateThemeRequest(request, {
             currentThemeId: current.theme.id,
@@ -3533,9 +3654,10 @@ async function runOwnedWatch(options) {
             ready: false,
             lastThemeRequestSequence: 0,
             lastThemeActionRequestSequence: 0,
-            pollFailureCount: 0,
-            healthFailureCount: 0,
-            nextHealthCheckAt: Date.now() + 4000,
+            requestPollState: { transportFailures: 0 },
+            nextRequestPollAt: Date.now() + REQUEST_POLL_INTERVAL_MS,
+            ownershipProbeState: { ownershipFailures: 0, transportFailures: 0 },
+            nextHealthCheckAt: Date.now() + OWNERSHIP_PROBE_INTERVAL_MS,
             recoveryQueue: null,
           };
           connectionEpoch = mutationEpoch;
@@ -3557,13 +3679,22 @@ async function runOwnedWatch(options) {
           const initialOperation = activeOperation;
           recoveryOperation = initialOperation ? null : cycleRecovery;
           const pausing = initialOperation?.status === "pausing";
+          let adoptedCurrent = false;
+          if (!controlOnly && !initialOperation && !recoveryOperation) {
+            try {
+              const existing = await probeLoadedThemeOwnership(session, current, 1000);
+              adoptedCurrent = shouldAdoptLoadedTheme(existing, current);
+            } catch {}
+          }
           if (!controlOnly) {
             try {
               record.earlyScriptId = await registerEarlyForRecord(
                 record, current.payload, current.revision,
               );
               record.earlyRevision = record.earlyScriptId ? current.revision : null;
-              await session.evaluate(earlyPayloadFor(current.payload, current.revision));
+              if (!adoptedCurrent) {
+                await session.evaluate(earlyPayloadFor(current.payload, current.revision));
+              }
               if (controlOnly || mutationEpoch !== connectionEpoch) await invalidateEarly(record);
             } catch (error) {
               record.needsLoadFallback = true;
@@ -3577,24 +3708,25 @@ async function runOwnedWatch(options) {
             console.log(`[dream-skin] connected control-only target ${target.id}`);
             continue;
           }
-          record.operationToken = initialOperation?.token
-            ?? recoveryOperation?.token
-            ?? nextOperationToken();
-          record.operationExternal = Boolean(initialOperation || recoveryOperation);
-          await presentOperationUi(
-            session,
-            record.operationToken,
-            "loading",
-            initialOperation
-              ? operationKindMessage(initialOperation.status === "pausing" ? "pause" : "apply")
-              : recoveryOperation
-                ? "暂停未完成，正在恢复原皮肤…"
-              : `正在应用「${current.theme.name}」…`,
+          const presentConnectionOperation = shouldPresentConnectionOperation(
+            initialOperation, recoveryOperation,
           );
+          record.operationToken = initialOperation?.token ?? recoveryOperation?.token ?? null;
+          record.operationExternal = Boolean(initialOperation || recoveryOperation);
+          if (presentConnectionOperation) {
+            await presentOperationUi(
+              session,
+              record.operationToken,
+              "loading",
+              initialOperation
+                ? operationKindMessage(initialOperation.status === "pausing" ? "pause" : "apply")
+                : "暂停未完成，正在恢复原皮肤…",
+            );
+          }
           if (controlOnly || pausing) {
             continue;
           }
-          const earlyApplied = await session.evaluate(
+          const earlyApplied = adoptedCurrent || await session.evaluate(
             `window.__CODEX_DREAM_SKIN_EARLY_APPLIED__ === ${JSON.stringify(current.revision)}`,
           );
           if (!earlyApplied) {
@@ -3606,7 +3738,7 @@ async function runOwnedWatch(options) {
               `window.__CODEX_DREAM_SKIN_EARLY_GENERATION__ = ${JSON.stringify(`fallback:${current.revision}`)}`,
             );
           }
-          if (current.dynamicRenderer || !earlyApplied) {
+          if (!adoptedCurrent && (current.dynamicRenderer || !earlyApplied)) {
             await applyLoadedToSession(session, current);
           }
           if (controlOnly || mutationEpoch !== connectionEpoch) {
@@ -3628,12 +3760,10 @@ async function runOwnedWatch(options) {
               1000,
             );
             recoveredPauseThisCycle = true;
-          } else if (!record.operationExternal) {
-            await presentOperationUi(
-              session, record.operationToken, "success", `已应用「${current.theme.name}」`,
-            );
           }
-          console.log(`[dream-skin] injected verified ChatGPT target ${target.id}`);
+          console.log(adoptedCurrent
+            ? `[dream-skin] adopted existing verified ChatGPT target ${target.id}`
+            : `[dream-skin] injected verified ChatGPT target ${target.id}`);
         } catch (error) {
           const recoveryStillCurrent = recoveryOperation && !activeOperation
             && pauseRecovery?.token === recoveryOperation.token;
@@ -3669,7 +3799,7 @@ async function runOwnedWatch(options) {
         await writeModeAck(options.operationAck, cycleRecovery.token, "full");
         pauseRecovery = null;
       }
-      const pollDelay = sessions.size ? 800 : (targets.length ? 250 : 100);
+      const pollDelay = steadyStateWatchDelay(sessions.size, targets.length);
       await new Promise((resolve) => setTimeout(resolve, pollDelay));
     }
   } finally {

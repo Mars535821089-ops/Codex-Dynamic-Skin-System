@@ -109,6 +109,7 @@ tests/launchd-start-guard.test.mjs
 tests/payload-template-integrity.test.mjs
 tests/public-update-config.test.mjs
 tests/renderer-inject.test.mjs
+tests/renderer-probe-policy.test.mjs
 tests/renderer-recovery-queue.test.mjs
 tests/renderer-request-poll.test.mjs
 tests/renderer-verification.test.mjs

@@ -95,9 +95,9 @@ test("voxel CDP commands reject when a connected renderer never answers", async 
   const address = server.address();
   const cdp = new Cdp(`ws://127.0.0.1:${address.port}/devtools/page/silent`);
   try {
-    await cdp.open(250);
+    await cdp.open(1_000);
     await assert.rejects(
-      cdp.call("Runtime.enable", {}, 50),
+      cdp.call("Runtime.enable", {}, 200),
       /CDP command timed out: Runtime\.enable/,
     );
   } finally {

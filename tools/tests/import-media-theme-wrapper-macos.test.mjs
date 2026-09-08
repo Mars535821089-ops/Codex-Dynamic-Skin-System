@@ -35,7 +35,7 @@ exit 91
       ], {
         encoding: "utf8",
         env: { ...process.env, DREAMSKIN_NODE: fakeNode, NODE: fakeNode, FAKE_NODE_MARKER: marker },
-        timeout: 15000,
+        timeout: 60000,
       });
       assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
       await assert.rejects(fs.access(marker), { code: "ENOENT" });

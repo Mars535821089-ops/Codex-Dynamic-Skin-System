@@ -1437,6 +1437,45 @@ export async function pollRendererRequests(session, timeoutMs = 1500) {
   })()`, timeoutMs);
 }
 
+const OWNERSHIP_PROBE_INTERVAL_MS = 10_000;
+const REQUEST_POLL_INTERVAL_MS = 2_000;
+const TRANSPORT_BACKOFF_LIMIT_MS = 30_000;
+
+function exponentialBackoff(baseMs, failureCount) {
+  return Math.min(TRANSPORT_BACKOFF_LIMIT_MS, baseMs * (2 ** Math.max(0, failureCount - 1)));
+}
+
+export function nextOwnershipProbeState(previous = {}, outcome) {
+  if (outcome === "healthy") {
+    return { ownershipFailures: 0, transportFailures: 0, recover: false,
+      delayMs: OWNERSHIP_PROBE_INTERVAL_MS };
+  }
+  if (outcome === "transport-error") {
+    const transportFailures = (previous.transportFailures ?? 0) + 1;
+    return { ownershipFailures: 0, transportFailures, recover: false,
+      delayMs: exponentialBackoff(5_000, transportFailures) };
+  }
+  if (outcome === "ownership-mismatch") {
+    const ownershipFailures = (previous.ownershipFailures ?? 0) + 1;
+    const recover = ownershipFailures >= 2;
+    return { ownershipFailures: recover ? 0 : ownershipFailures, transportFailures: 0, recover,
+      delayMs: recover ? OWNERSHIP_PROBE_INTERVAL_MS : 5_000 };
+  }
+  throw new TypeError(`Unsupported ownership probe outcome: ${outcome}`);
+}
+
+export function nextRequestPollState(previous = {}, outcome) {
+  if (outcome === "healthy") {
+    return { transportFailures: 0, recover: false, delayMs: REQUEST_POLL_INTERVAL_MS };
+  }
+  if (outcome === "transport-error") {
+    const transportFailures = (previous.transportFailures ?? 0) + 1;
+    return { transportFailures, recover: false,
+      delayMs: exponentialBackoff(3_000, transportFailures) };
+  }
+  throw new TypeError(`Unsupported renderer request poll outcome: ${outcome}`);
+}
+
 export async function presentUnsupportedThemeAction(session, request) {
   const actionName = request?.action === "delete-theme" ? "删除主题" : "导入媒体";
   const status = JSON.stringify({
@@ -1885,6 +1924,7 @@ async function runOwnedWatch(options) {
   const recoveryQueues = new Map();
   const readyTargets = new Set();
   const pollFailures = new Map();
+  const nextRequestPolls = new Map();
   const healthFailures = new Map();
   const nextHealthChecks = new Map();
   const targetFailures = new Map();
@@ -1915,6 +1955,7 @@ async function runOwnedWatch(options) {
   const detachSessionState = (id) => {
     readyTargets.delete(id);
     pollFailures.delete(id);
+    nextRequestPolls.delete(id);
     healthFailures.delete(id);
     nextHealthChecks.delete(id);
     lastThemeRequestSequences.delete(id);
@@ -1928,6 +1969,7 @@ async function runOwnedWatch(options) {
     lastThemeRequestSequences.delete(id);
     lastThemeActionRequestSequences.delete(id);
     pollFailures.delete(id);
+    nextRequestPolls.set(id, Date.now() + REQUEST_POLL_INTERVAL_MS);
     await clearPendingRendererRequests(session);
     if (paused) {
       if (!await verifyRemovedSession(session)) {
@@ -1954,8 +1996,8 @@ async function runOwnedWatch(options) {
       if (!verified?.pass) throw new Error("Recovered theme verification failed");
     }
     if (stopping || sessions.get(id) !== session || session.closed) return false;
-    healthFailures.set(id, 0);
-    nextHealthChecks.set(id, Date.now() + 4000);
+    healthFailures.set(id, { ownershipFailures: 0, transportFailures: 0 });
+    nextHealthChecks.set(id, Date.now() + OWNERSHIP_PROBE_INTERVAL_MS);
     readyTargets.add(id);
     console.log(`[dream-skin] recovered renderer ${id} after ${reason}`);
     return true;
@@ -2033,21 +2075,20 @@ async function runOwnedWatch(options) {
           const rendererThemeRequests = [];
           const rendererActionRequests = [];
           for (const [id, session] of sessions) {
-            if (!readyTargets.has(id) || recoveryQueues.get(id)?.pending()) continue;
+            const pollNow = Date.now();
+            if (!readyTargets.has(id) || recoveryQueues.get(id)?.pending()
+              || pollNow < (nextRequestPolls.get(id) ?? 0)) continue;
             let rendererPoll;
             try {
               rendererPoll = await pollRendererRequests(session, 1500);
-              pollFailures.set(id, 0);
-            } catch {
-              const failures = (pollFailures.get(id) ?? 0) + 1;
-              pollFailures.set(id, failures);
-              if (failures >= 3) {
-                pollFailures.set(id, 0);
-                console.warn(`[dream-skin] renderer request channel ${id} is unresponsive; repairing`);
-                if (recoveryQueues.get(id)?.request("request-poll-failed")) readyTargets.delete(id);
-              }
+              pollFailures.set(id, nextRequestPollState(pollFailures.get(id), "healthy"));
+            } catch (error) {
+              const state = nextRequestPollState(pollFailures.get(id), "transport-error");
+              pollFailures.set(id, state);
+              nextRequestPolls.set(id, pollNow + state.delayMs);
               continue;
             }
+            nextRequestPolls.set(id, pollNow + pollFailures.get(id).delayMs);
             const themeRequest = rendererPoll?.themeRequest ?? null;
             const validatedThemeRequest = validateThemeRequest(themeRequest, {
               currentThemeId: loadedPayload.theme.id,
@@ -2185,8 +2226,8 @@ async function runOwnedWatch(options) {
               );
               if (!verified?.pass) throw new Error("Live theme update verification failed");
             }
-            healthFailures.set(id, 0);
-            nextHealthChecks.set(id, Date.now() + 4000);
+            healthFailures.set(id, { ownershipFailures: 0, transportFailures: 0 });
+            nextHealthChecks.set(id, Date.now() + OWNERSHIP_PROBE_INTERVAL_MS);
             readyTargets.add(id);
           } catch (error) {
             console.error(`[dream-skin] live theme update failed for ${id}: ${error.message}`);
@@ -2229,7 +2270,7 @@ async function runOwnedWatch(options) {
       for (const [id, session] of sessions) {
         if (!readyTargets.has(id) || recoveryQueues.get(id)?.pending()
             || healthNow < (nextHealthChecks.get(id) ?? 0)) continue;
-        nextHealthChecks.set(id, healthNow + 4000);
+        let outcome = "healthy";
         try {
           const verified = paused
             ? await verifyRemovedSession(session)
@@ -2238,17 +2279,17 @@ async function runOwnedWatch(options) {
               expectsVisibleDynamicRoot(loadedPayload), true,
             );
           const passed = paused ? verified === true : verified?.pass === true;
-          if (!passed) throw new Error("renderer state did not match the active watcher state");
-          healthFailures.set(id, 0);
+          if (!passed) outcome = "ownership-mismatch";
         } catch (error) {
-          const failures = (healthFailures.get(id) ?? 0) + 1;
-          healthFailures.set(id, failures);
-          if (failures >= 2) {
-            healthFailures.set(id, 0);
-            console.warn(`[dream-skin] renderer verification failed for ${id}: ${error.message}; repairing`);
-            if (recoveryQueues.get(id)?.request("periodic-verification-failed")) {
-              readyTargets.delete(id);
-            }
+          outcome = "transport-error";
+        }
+        const healthState = nextOwnershipProbeState(healthFailures.get(id), outcome);
+        healthFailures.set(id, healthState);
+        nextHealthChecks.set(id, healthNow + healthState.delayMs);
+        if (healthState.recover) {
+          console.warn(`[dream-skin] renderer verification failed for ${id}; repairing`);
+          if (recoveryQueues.get(id)?.request("periodic-verification-failed")) {
+            readyTargets.delete(id);
           }
         }
       }
@@ -2320,8 +2361,10 @@ async function runOwnedWatch(options) {
             if (!verified?.pass) throw new Error("Initial theme verification failed");
           }
           readyTargets.add(target.id);
-          healthFailures.set(target.id, 0);
-          nextHealthChecks.set(target.id, Date.now() + 4000);
+          pollFailures.set(target.id, { transportFailures: 0 });
+          nextRequestPolls.set(target.id, Date.now() + REQUEST_POLL_INTERVAL_MS);
+          healthFailures.set(target.id, { ownershipFailures: 0, transportFailures: 0 });
+          nextHealthChecks.set(target.id, Date.now() + OWNERSHIP_PROBE_INTERVAL_MS);
           targetFailures.delete(target.id);
           console.log(`[dream-skin] injected target ${target.id}`);
         } catch (error) {

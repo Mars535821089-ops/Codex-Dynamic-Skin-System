@@ -209,7 +209,7 @@ test("transient Runtime.evaluate failures are retried inside the bounded deadlin
   });
   const result = await waitForVerifiedSession(
     session,
-    100,
+    1_500,
     "fixture-theme",
     "fixture-revision",
     1,

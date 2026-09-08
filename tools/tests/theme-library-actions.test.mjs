@@ -8,7 +8,12 @@ import { fileURLToPath } from "node:url";
 import * as actions from "../../macos/scripts/theme-library-actions.mjs";
 import { scanThemeLibrary } from "../../macos/scripts/injector.mjs";
 
-const { archiveThemeDirectory, importMediaTheme, restoreArchivedThemeDirectory } = actions;
+const {
+  archiveThemeDirectory,
+  importMediaTheme,
+  restoreArchivedThemeDirectory,
+  shouldNormalizeImportedVideo,
+} = actions;
 
 const mediaRoot = fileURLToPath(new URL("fixtures/media/", import.meta.url));
 const actionsSource = await fs.readFile(
@@ -21,6 +26,44 @@ test("native media chooser activates before presenting the file dialog", () => {
     actionsSource,
     /export async function chooseMediaFile\(\)[\s\S]*?const script = \[[\s\S]*?"with timeout of 600 seconds",[\s\S]*?"tell application \\"Finder\\"",\s*"activate",\s*"set selectedFile to choose file/,
   );
+});
+
+test("oversized or high-frame-rate video is normalized before becoming a live theme", () => {
+  assert.equal(shouldNormalizeImportedVideo({ family: "video", width: 3440, height: 1440, fps: 60 }), true);
+  assert.equal(shouldNormalizeImportedVideo({ family: "video", width: 1920, height: 1080, fps: 30 }), true);
+  assert.equal(shouldNormalizeImportedVideo({ family: "video", width: 1280, height: 720, fps: 24 }), false);
+  assert.equal(shouldNormalizeImportedVideo({ family: "video", width: 720, height: 1280, fps: 24 }), false);
+  assert.equal(shouldNormalizeImportedVideo({ family: "image", width: 3440, height: 1440 }), false);
+});
+
+test("video import publishes the normalized file and revalidates its playback limits", async (t) => {
+  const root = await tempLibrary(t);
+  const source = path.join(mediaRoot, "loop-h264.mp4");
+  const posterFixture = path.join(mediaRoot, "tiny.png");
+  const imported = await importMediaTheme({
+    libraryRoot: root,
+    sourcePath: source,
+    themeName: "Normalized loop",
+    inspectMedia: async (filePath, options) => {
+      if (path.resolve(filePath) === path.resolve(source)) {
+        return { family: "video", container: "mp4", mime: "video/mp4", sizeBytes: 10,
+          width: 3440, height: 1440, fps: 60, hasAudio: false };
+      }
+      return options.role === "poster"
+        ? { family: "image", container: "png", mime: "image/png", sizeBytes: 10, width: 1, height: 1 }
+        : { family: "video", container: "mp4", mime: "video/mp4", sizeBytes: 10,
+          width: 1280, height: 536, fps: 24, hasAudio: false };
+    },
+    optimizeVideo: async (_input, output) => fs.copyFile(source, output),
+    createPoster: async (_video, poster) => fs.copyFile(posterFixture, poster),
+  });
+
+  assert.equal(imported.optimized, true);
+  assert.equal(imported.media.width, 1280);
+  assert.equal(imported.media.height, 536);
+  assert.equal(imported.media.fps, 24);
+  assert.equal(await fs.readFile(path.join(imported.themeDir, "media", "visual.mp4"), "hex"),
+    await fs.readFile(source, "hex"));
 });
 
 async function tempLibrary(t) {

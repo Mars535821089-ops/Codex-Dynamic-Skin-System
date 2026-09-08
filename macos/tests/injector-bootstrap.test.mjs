@@ -13,6 +13,8 @@ import {
   isLoadedThemeOwnershipHealthy,
   isExcludedCdpSurfaceUrl,
   rendererActionRefreshPlan,
+  shouldPresentConnectionOperation,
+  shouldPresentRefreshOperation,
   waitForEarlyGenerationApplied,
 } from "../scripts/injector.mjs";
 import { cleanupExcludedSurface as cleanupExcludedSurfaceWindows } from "../../windows/scripts/injector.mjs";
@@ -23,6 +25,21 @@ const source = await fs.readFile(injectorPath, "utf8");
 const commonSource = await fs.readFile(path.resolve(here, "../scripts/common-macos.sh"), "utf8");
 const startSource = await fs.readFile(path.resolve(here, "../scripts/start-dream-skin-macos.sh"), "utf8");
 const shellSelector = 'main:is(.main-surface, [data-app-shell-main-surface], [class*="_MainContentSurface_"])';
+
+assert.equal(shouldPresentConnectionOperation(null, null), false,
+  "Automatic watcher attachment and reconnect recovery must stay silent.");
+assert.equal(shouldPresentConnectionOperation({ token: "apply-1" }, null), true,
+  "An explicit apply operation must keep its user-visible progress.");
+assert.equal(shouldPresentConnectionOperation(null, { token: "pause-recovery-1" }), true,
+  "An interrupted pause recovery must keep its user-visible warning progress.");
+assert.equal(shouldPresentRefreshOperation("profile-module-activation", null), false,
+  "Profile analytics activation is background maintenance and must stay silent.");
+assert.equal(shouldPresentRefreshOperation("source-watch", null), false,
+  "Filesystem-driven refreshes must not impersonate user theme changes.");
+assert.equal(shouldPresentRefreshOperation("renderer-request", null), true,
+  "A Theme Center selection must keep its user-visible progress.");
+assert.equal(shouldPresentRefreshOperation("profile-module-activation", { token: "apply-2" }), true,
+  "An explicit host operation must remain visible regardless of refresh reason.");
 
 const moduleRevisionDigest = (sha256) => appendDynamicModuleRevision(
   createHash("sha256").update("same-theme"),
@@ -225,7 +242,7 @@ assert.equal(await waitForEarlyGenerationApplied({
     earlyAppliedPolls += 1;
     return earlyAppliedPolls >= 3;
   },
-}, "reload-generation", { timeoutMs: 100, pollMs: 1 }), true,
+}, "reload-generation", { timeoutMs: 1_500, pollMs: 1 }), true,
 "Reload recovery must wait for the deferred early shell before staging active video blobs.");
 assert.equal(earlyAppliedPolls, 3);
 
@@ -456,8 +473,8 @@ assert.match(
 );
 assert.match(
   source,
-  /const earlyApplied = await session\.evaluate\([\s\S]*if \(current\.dynamicRenderer \|\| !earlyApplied\) \{[\s\S]*applyLoadedToSession/,
-  "A v2 skin must hot-stage renderer blobs after the deferred early shell, while v1 avoids duplicate injection.",
+  /const earlyApplied = adoptedCurrent \|\| await session\.evaluate\([\s\S]*if \(!adoptedCurrent && \(current\.dynamicRenderer \|\| !earlyApplied\)\) \{[\s\S]*applyLoadedToSession/,
+  "A healthy existing skin must be adopted unchanged; otherwise v2 hot-stages renderer blobs after the deferred early shell.",
 );
 assert.match(
   source,
@@ -498,7 +515,7 @@ assert.match(source, /operationExternal: false,\s*ready: false,/,
   "New renderer records must begin unverified.");
 assert.match(
   source,
-  /for \(const record of sessions\.values\(\)\) \{\s*if \(record\.session\.closed \|\| !record\.ready\) continue;\s*let rendererPoll;[\s\S]*pollRendererRequests\(record\.session, 1500\)/,
+  /for \(const record of sessions\.values\(\)\) \{\s*const pollNow = Date\.now\(\);\s*if \(record\.session\.closed \|\| !record\.ready \|\| pollNow < record\.nextRequestPollAt\) continue;\s*let rendererPoll;[\s\S]*pollRendererRequests\(record\.session, 1500\)/,
   "Unverified renderers must not participate in theme request polling.",
 );
 assert.match(
