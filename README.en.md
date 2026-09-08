@@ -10,6 +10,7 @@ Codex Dynamic Skin System is a cross-platform dynamic theme center for Codex Des
 - PNG, JPEG, WebP, GIF, MP4, and WebM themes
 - Safe CSS validation, package validation, containment checks, and media limits
 - Self-healing media ownership after navigation or React root replacement
+- Local self-healing without model calls, provider APIs, or token use. If automatic restart is explicitly enabled, a new Codex launch gets a 60-second grace period; restart is allowed only when task activity is confirmed idle, is limited to once per fault cycle, and fails closed when activity is unknown
 - Native UI preservation and recoverable failures
 
 Video background playback is off by default so an inactive Codex window does not keep consuming extra GPU/CPU. Enabling it requires one Codex restart before the full background-playback capability is available, and it increases resource use.

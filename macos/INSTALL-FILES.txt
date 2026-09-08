@@ -105,6 +105,7 @@ tests/import-theme-package-tests.sh
 tests/injector-bootstrap.test.mjs
 tests/injector-launchd-policy.test.mjs
 tests/installer-preflight.test.sh
+tests/launchd-start-guard.test.mjs
 tests/payload-template-integrity.test.mjs
 tests/public-update-config.test.mjs
 tests/renderer-inject.test.mjs

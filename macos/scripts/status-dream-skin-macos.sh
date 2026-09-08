@@ -34,6 +34,7 @@ THEME_ID=""
 APPLIED_THEME_NAME=""
 APPLIED_THEME_ID=""
 CODEX_RUNNING="false"
+CODEX_PID=""
 OPERATION_STATUS=""
 OPERATION_MESSAGE=""
 
@@ -109,6 +110,7 @@ if [ -f "$STATE_PATH" ]; then
   saved_start="$(read_json_text_field "$STATE_SNAPSHOT" injectorStartedAt)"
   saved_node="$(read_json_text_field "$STATE_SNAPSHOT" nodePath)"
   saved_injector="$(read_json_text_field "$STATE_SNAPSHOT" injectorPath)"
+  CODEX_PID="$(read_json_text_field "$STATE_SNAPSHOT" codexPid)"
   APPLIED_THEME_ID="$(read_json_text_field "$STATE_SNAPSHOT" appliedThemeId)"
   APPLIED_THEME_NAME="$(read_json_text_field "$STATE_SNAPSHOT" appliedThemeName)"
   if injector_identity_matches "${pid:-}" "$saved_start" "$saved_node" "$saved_injector" "$PORT"; then
@@ -209,9 +211,10 @@ if [ "$JSON" = "true" ]; then
   json_escape() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "$s"; }
   bool() { [ "$1" = "true" ] && printf 'true' || printf 'false'; }
   case "$PORT" in ''|*[!0-9]*) port_json="\"$(json_escape "$PORT")\"" ;; *) port_json="$PORT" ;; esac
-  printf '{"session":"%s","operation":"%s","operationMessage":"%s","port":%s,"injectorAlive":%s,"cdpOk":%s,"codexRunning":%s,"themeId":"%s","themeName":"%s","appliedThemeId":"%s","appliedThemeName":"%s"}\n' \
+  case "$CODEX_PID" in ''|*[!0-9]*) codex_pid_json="0" ;; *) codex_pid_json="$CODEX_PID" ;; esac
+  printf '{"session":"%s","operation":"%s","operationMessage":"%s","port":%s,"injectorAlive":%s,"cdpOk":%s,"codexRunning":%s,"codexPid":%s,"themeId":"%s","themeName":"%s","appliedThemeId":"%s","appliedThemeName":"%s"}\n' \
     "$(json_escape "$SESSION")" "$(json_escape "$OPERATION_STATUS")" "$(json_escape "$OPERATION_MESSAGE")" \
-    "$port_json" "$(bool "$INJECTOR_ALIVE")" "$(bool "$CDP_OK")" "$(bool "$CODEX_RUNNING")" \
+    "$port_json" "$(bool "$INJECTOR_ALIVE")" "$(bool "$CDP_OK")" "$(bool "$CODEX_RUNNING")" "$codex_pid_json" \
     "$(json_escape "$THEME_ID")" "$(json_escape "$THEME_NAME")" \
     "$(json_escape "$APPLIED_THEME_ID")" "$(json_escape "$APPLIED_THEME_NAME")"
   exit 0

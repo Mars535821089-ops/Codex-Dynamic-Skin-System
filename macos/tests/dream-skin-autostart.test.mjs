@@ -139,6 +139,75 @@ test("automatic restart is allowed only after every current task is terminal", a
   });
 });
 
+test("a syntactically valid current record without lifecycle state fails closed", async () => {
+  await withSessions({
+    "2026/09/08/unknown.jsonl": [JSON.stringify({
+      timestamp: new Date(20_000).toISOString(),
+      type: "event_msg",
+      payload: { type: "token_count" },
+    })],
+  }, async (root) => {
+    assert.deepEqual(await probeSessionActivity(root, 10_000), {
+      status: "unknown",
+      activeCount: 0,
+    });
+  });
+});
+
+test("a fresh plain Codex launch receives a full startup grace period", () => {
+  const plain = snapshot({
+    compliantPids: [],
+    plainPids: [42],
+    watcherState: "unhealthy",
+    appStartedAtMs: now - 1_000,
+  });
+  assert.deepEqual(
+    decideAutostartAction(
+      plain,
+      null,
+      now,
+      cooldown,
+      { allowCodexRestart: true, launchGraceMs: 60_000 },
+    ),
+    { action: "wait", reason: "launch-grace" },
+  );
+  assert.deepEqual(
+    decideAutostartAction(
+      { ...plain, appStartedAtMs: now - 60_001 },
+      null,
+      now,
+      cooldown,
+      { allowCodexRestart: true, launchGraceMs: 60_000 },
+    ),
+    { action: "restart", pid: 42 },
+  );
+});
+
+test("a full restart is latched until health or a real stop starts a new fault cycle", () => {
+  const plain = snapshot({ compliantPids: [], plainPids: [42], watcherState: "unhealthy" });
+  const latched = {
+    lastAction: "restart",
+    lastAttemptPid: 42,
+    lastAttemptAt: now - cooldown - 1,
+    lastResult: "failed",
+    observedStopped: false,
+  };
+  assert.deepEqual(
+    decideAutostartAction(plain, latched, now, cooldown, { allowCodexRestart: true }),
+    { action: "wait", reason: "restart-latched" },
+  );
+  assert.deepEqual(
+    decideAutostartAction(
+      plain,
+      { ...latched, observedStopped: true },
+      now,
+      cooldown,
+      { allowCodexRestart: true },
+    ),
+    { action: "restart", pid: 42 },
+  );
+});
+
 test("uncertain current activity fails closed and the start script rechecks before stopping Codex", async () => {
   await withSessions({
     "2026/09/08/broken.jsonl": [
@@ -230,6 +299,27 @@ test("watcher repair is structurally unable to request a Codex restart", () => {
   );
 });
 
+test("watcher health is bound to the current Codex PID even when Electron hides launch flags", () => {
+  assert.equal(watcherStateFromStatus(
+    '{"session":"active","injectorAlive":true,"codexPid":42}', 42,
+  ), "healthy");
+  assert.equal(watcherStateFromStatus(
+    '{"session":"applying","injectorAlive":true,"codexPid":42}', 42,
+  ), "healthy");
+  assert.equal(watcherStateFromStatus(
+    '{"session":"active","injectorAlive":true,"codexPid":84}', 42,
+  ), "unhealthy");
+});
+
+test("status publishes the Codex PID bound to the active injector", () => {
+  const statusSource = fs.readFileSync(
+    new URL("../scripts/status-dream-skin-macos.sh", import.meta.url),
+    "utf8",
+  );
+  assert.match(statusSource, /CODEX_PID=/u);
+  assert.match(statusSource, /"codexPid":%s/u);
+});
+
 test("status detects the real app executable instead of relying on a truncated process name", () => {
   const statusSource = fs.readFileSync(
     new URL("../scripts/status-dream-skin-macos.sh", import.meta.url),
@@ -238,6 +328,17 @@ test("status detects the real app executable instead of relying on a truncated p
   assert.doesNotMatch(statusSource, /\/usr\/bin\/pgrep -x (?:ChatGPT|Codex)/u);
   assert.match(statusSource, /\/bin\/ps -axo command=/u);
   assert.match(statusSource, /Contents\\\/MacOS\\\/\(ChatGPT\|Codex\)/u);
+});
+
+test("a healthy watcher clears the stopped marker and full-restart latch", () => {
+  const source = fs.readFileSync(
+    new URL("../scripts/dream-skin-autostart.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /decision\.reason === "compliant"[\s\S]*state\?\.observedStopped !== false[\s\S]*lastAction: null[\s\S]*observedStopped: false/u,
+  );
 });
 
 test("recent corrections are cooled down, but failed repairs retry afterwards", () => {

@@ -82,15 +82,56 @@ submitted_start_job_matches() {
   local expected_program="$2"
   local line=""
   local program=""
+  local arguments=""
+  local candidate=""
+  local home_program=""
+  local braced_home_program=""
   local submitted="false"
+  local keepalive="false"
+  local in_arguments="false"
   while IFS= read -r line; do
     line="${line#"${line%%[![:space:]]*}"}"
     case "$line" in
-      'path = (submitted by launchctl)') submitted="true" ;;
+      'path = (submitted by launchctl'*) submitted="true" ;;
       'program = '*) program="${line#program = }" ;;
+      'arguments = {') in_arguments="true" ;;
+      'properties = '*keepalive*) keepalive="true" ;;
+      '}') [ "$in_arguments" != "true" ] || in_arguments="false" ;;
+      *)
+        if [ "$in_arguments" = "true" ]; then
+          arguments="${arguments}${arguments:+$'\n'}${line}"
+        fi
+        ;;
     esac
   done <<< "$description"
-  [ "$submitted" = "true" ] && [ "$program" = "$expected_program" ]
+  [ "$submitted" = "true" ] && [ "$keepalive" = "true" ] || return 1
+  [ "$program" != "$expected_program" ] || return 0
+  case "$program" in
+    /bin/bash|/bin/zsh|/bin/sh) ;;
+    *) return 1 ;;
+  esac
+  if [ -n "${HOME:-}" ]; then
+    case "$expected_program" in
+      "$HOME"/*)
+        home_program="\$HOME${expected_program#"$HOME"}"
+        braced_home_program="\${HOME}${expected_program#"$HOME"}"
+        ;;
+    esac
+  fi
+  while IFS= read -r line; do
+    for candidate in "$expected_program" "$home_program" "$braced_home_program"; do
+      [ -n "$candidate" ] || continue
+      [ "$line" != "$candidate" ] || return 0
+      case "$line" in
+        *\""$candidate"\"*|*\'"$candidate"\'*) return 0 ;;
+      esac
+      case "$candidate" in
+        *[[:space:]]*) ;;
+        *) case " $line " in *" $candidate "*) return 0 ;; esac ;;
+      esac
+    done
+  done <<< "$arguments"
+  return 1
 }
 
 guard_against_submitted_keepalive_start() {

@@ -12,6 +12,7 @@ const REQUIRED_FLAGS = [
 const PORT_FLAG = /(?:^|\s)--remote-debugging-port=(\d{4,5})(?=\s|$)/u;
 const ISOLATED_PROFILE_FLAG = /(?:^|\s)--user-data-dir(?:=|\s)/u;
 const DEFAULT_COOLDOWN_MS = 5 * 60 * 1000;
+const DEFAULT_LAUNCH_GRACE_MS = 60 * 1000;
 const MAX_SESSION_TAIL_BYTES = 16 * 1024 * 1024;
 const SESSION_CLOCK_TOLERANCE_MS = 2_000;
 const ACTIVE_EVENT = "task_started";
@@ -49,11 +50,12 @@ export function classifyCodexProcesses(listing, executable) {
   };
 }
 
-export function watcherStateFromStatus(output) {
+export function watcherStateFromStatus(output, expectedCodexPid) {
   try {
     const status = JSON.parse(String(output || ""));
     if (status?.session === "paused") return "paused";
-    if (status?.injectorAlive === true && new Set(["active", "applying"]).has(status?.session)) {
+    if (status?.injectorAlive === true && new Set(["active", "applying"]).has(status?.session)
+        && (!Number.isSafeInteger(expectedCodexPid) || status?.codexPid === expectedCodexPid)) {
       return "healthy";
     }
   } catch {
@@ -132,6 +134,7 @@ export async function probeSessionActivity(sessionsRoot, appStartedAtMs) {
       if (stat.mtimeMs < appStartedAtMs - SESSION_CLOCK_TOLERANCE_MS) continue;
       const { text, truncated } = await readSessionTail(filePath, stat.size);
       let latest = null;
+      let sawCurrentRecord = false;
       for (const line of text.split(/\r?\n/u)) {
         if (!line.trim()) continue;
         let record;
@@ -141,11 +144,19 @@ export async function probeSessionActivity(sessionsRoot, appStartedAtMs) {
           uncertain = true;
           continue;
         }
+        const recordTimestamp = Date.parse(record?.timestamp || "");
+        if (!Number.isFinite(recordTimestamp)) {
+          uncertain = true;
+          continue;
+        }
+        if (recordTimestamp >= appStartedAtMs - SESSION_CLOCK_TOLERANCE_MS) {
+          sawCurrentRecord = true;
+        }
         const event = lifecycleEvent(record, appStartedAtMs);
         if (event && (!latest || event.timestamp >= latest.timestamp)) latest = event;
       }
       if (latest?.type === ACTIVE_EVENT) activeCount += 1;
-      else if (!latest && truncated) uncertain = true;
+      else if (!latest && (truncated || sawCurrentRecord)) uncertain = true;
     }
     if (activeCount > 0) return { status: "busy", activeCount };
     if (uncertain) return { status: "unknown", activeCount: 0 };
@@ -160,7 +171,10 @@ export function decideAutostartAction(
   state,
   now,
   cooldownMs = DEFAULT_COOLDOWN_MS,
-  { allowCodexRestart = false } = {},
+  {
+    allowCodexRestart = false,
+    launchGraceMs = DEFAULT_LAUNCH_GRACE_MS,
+  } = {},
 ) {
   if (!snapshot || !Array.isArray(snapshot.pids) || !Number.isFinite(now)) {
     throw new Error("Invalid autostart decision input");
@@ -183,6 +197,13 @@ export function decideAutostartAction(
   if (!Number.isSafeInteger(pid)) return { action: "wait", reason: "no-main-process" };
   if (!repairWatcher && !allowCodexRestart) {
     return { action: "wait", reason: "restart-not-authorized" };
+  }
+  if (!repairWatcher && Number.isFinite(snapshot.appStartedAtMs)
+      && now - snapshot.appStartedAtMs < launchGraceMs) {
+    return { action: "wait", reason: "launch-grace" };
+  }
+  if (!repairWatcher && state?.lastAction === "restart" && state?.observedStopped !== true) {
+    return { action: "wait", reason: "restart-latched" };
   }
   const attemptAge = Number.isFinite(state?.lastAttemptAt) ? now - state.lastAttemptAt : Infinity;
   const sameProcessRun = state?.observedStopped !== true;
@@ -226,11 +247,11 @@ async function processListing() {
   return result.stdout;
 }
 
-async function probeWatcherState(statusScript) {
+async function probeWatcherState(statusScript, expectedCodexPid) {
   const result = await collectChild(spawn("/bin/bash", [statusScript, "--json"], {
     stdio: ["ignore", "pipe", "pipe"],
   }));
-  return result.code === 0 ? watcherStateFromStatus(result.stdout) : "unhealthy";
+  return result.code === 0 ? watcherStateFromStatus(result.stdout, expectedCodexPid) : "unhealthy";
 }
 
 async function readState(statePath) {
@@ -367,12 +388,23 @@ async function main() {
   do {
     let state = await readState(options.statePath);
     const classified = classifyCodexProcesses(await processListing(), options.executable);
-    const snapshot = {
+    const solePid = classified.pids.length === 1 ? classified.pids[0] : null;
+    const watcherState = Number.isSafeInteger(solePid)
+      ? await probeWatcherState(options.statusScript, solePid)
+      : "unhealthy";
+    const appStartedAtMs = Number.isSafeInteger(solePid) && watcherState !== "healthy"
+      ? await processStartedAt(solePid)
+      : null;
+    const runtimeClassified = watcherState === "healthy" ? {
       ...classified,
+      compliantPids: [solePid],
+      plainPids: classified.plainPids.filter((pid) => pid !== solePid),
+    } : classified;
+    const snapshot = {
+      ...runtimeClassified,
       supervisorEnabled: !(await pathExists(options.disabledMarker)),
-      watcherState: classified.compliantPids.length > 0
-        ? await probeWatcherState(options.statusScript)
-        : "unhealthy",
+      watcherState,
+      appStartedAtMs,
     };
     const decision = decideAutostartAction(
       snapshot,
@@ -384,18 +416,27 @@ async function main() {
     if (decision.observedStopped && state?.observedStopped !== true) {
       state = { ...(state || {}), observedStopped: true };
       await writeState(options.statePath, state);
-    } else if (["compliant", "paused"].includes(decision.reason) && state?.lastResult !== "ok") {
+    } else if (decision.reason === "compliant"
+        && (state?.lastResult !== "ok" || state?.lastAction != null
+          || state?.observedStopped !== false)) {
+      state = { ...(state || {}), lastAction: null, lastResult: "ok", observedStopped: false };
+      await writeState(options.statePath, state);
+    } else if (decision.reason === "paused" && state?.lastResult !== "ok") {
       state = { ...(state || {}), lastResult: "ok", observedStopped: false };
       await writeState(options.statePath, state);
     } else if (["restart", "repair-watcher"].includes(decision.action)) {
       await sleep(options.graceMs);
       const confirmed = classifyCodexProcesses(await processListing(), options.executable);
       const supervisorStillEnabled = !(await pathExists(options.disabledMarker));
+      const confirmedWatcherState = confirmed.pids.length === 1
+        ? await probeWatcherState(options.statusScript, decision.pid)
+        : "unhealthy";
       const correctionStillRequired = supervisorStillEnabled && (
         decision.action === "restart"
           ? confirmed.plainPids.includes(decision.pid) && confirmed.compliantPids.length === 0
+            && confirmedWatcherState !== "healthy"
           : confirmed.compliantPids.includes(decision.pid)
-            && await probeWatcherState(options.statusScript) === "unhealthy"
+            && confirmedWatcherState === "unhealthy"
       );
       if (correctionStillRequired) {
         const attemptedAt = Date.now();
@@ -419,6 +460,7 @@ async function main() {
           }
         }
         await writeState(options.statePath, {
+          lastAction: decision.action,
           lastAttemptPid: decision.pid,
           lastAttemptAt: attemptedAt,
           lastResult: "running",
@@ -427,6 +469,7 @@ async function main() {
         console.log(`[dream-skin-autostart] ${decision.action} pid=${decision.pid}`);
         const exitCode = await runCorrection(options.startScript, decision.action, options.sessionsRoot);
         await writeState(options.statePath, {
+          lastAction: decision.action,
           lastAttemptPid: decision.pid,
           lastAttemptAt: attemptedAt,
           lastResult: exitCode === 0 ? "ok" : "failed",
