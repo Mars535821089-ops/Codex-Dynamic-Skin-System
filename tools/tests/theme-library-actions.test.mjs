@@ -263,3 +263,23 @@ test("theme deletion refuses paths outside the selected library", async (t) => {
     /direct child/i,
   );
 });
+
+test("theme deletion and rollback reject a replaced archive directory link", async (t) => {
+  const root = await tempLibrary(t); const outside = await tempLibrary(t);
+  const imported = await importMediaTheme({ libraryRoot: root, sourcePath: path.join(mediaRoot, "tiny.png") });
+  const linkType = process.platform === "win32" ? "junction" : "dir";
+  await fs.symlink(outside, path.join(root, ".deleted"), linkType);
+  await assert.rejects(() => archiveThemeDirectory({ libraryRoot: root, themeDir: imported.themeDir,
+    expectedThemeId: imported.themeId }), /symbolic|junction/i);
+  assert.ok(await fs.stat(imported.themeDir));
+  await fs.unlink(path.join(root, ".deleted"));
+  const archived = await archiveThemeDirectory({ libraryRoot: root, themeDir: imported.themeDir,
+    expectedThemeId: imported.themeId });
+  const movedArchive = path.join(outside, "archive");
+  await fs.rename(path.join(root, ".deleted"), movedArchive);
+  await fs.symlink(movedArchive, path.join(root, ".deleted"), linkType);
+  await assert.rejects(() => restoreArchivedThemeDirectory({ libraryRoot: root,
+    archiveDir: archived.archiveDir, destinationDir: imported.themeDir,
+    expectedThemeId: imported.themeId }), /symbolic|junction/i);
+  assert.ok(await fs.stat(path.join(movedArchive, path.basename(archived.archiveDir))));
+});

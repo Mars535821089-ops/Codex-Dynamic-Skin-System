@@ -195,8 +195,15 @@ function normalizeThemeStorage(storage) {
   try { plainObject(storage, "storage"); } catch {
     fail("THEME_STORAGE", "storage must be a plain object");
   }
+  // This path is display metadata, not a file URL. Validate both platforms
+  // independently of the host running the composer (including portable tests).
+  const absolutePath = typeof storage.path === "string" && (
+    storage.path.startsWith("/")
+    || /^[A-Za-z]:[\\/]/u.test(storage.path)
+    || /^\\\\[^\\/?\.][^\\/]*[\\/][^\\/]+(?:[\\/]|$)/u.test(storage.path)
+  );
   if (Object.keys(storage).sort().join(",") !== "available,bytes,custom,path,themeCount"
-    || typeof storage.path !== "string" || !storage.path.startsWith("/")
+    || !absolutePath
     || storage.path.length > 2048 || /[\u0000-\u001f\u007f]/u.test(storage.path)
     || typeof storage.available !== "boolean" || typeof storage.custom !== "boolean"
     || !Number.isSafeInteger(storage.bytes) || storage.bytes < 0

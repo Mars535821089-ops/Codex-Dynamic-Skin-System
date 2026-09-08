@@ -15,7 +15,7 @@ Codex Dynamic Skin System is a cross-platform dynamic theme center for Codex Des
 
 Video background playback is off by default so an inactive Codex window does not keep consuming extra GPU/CPU. Enabling it requires one Codex restart before the full background-playback capability is available, and it increases resource use.
 
-Keep video themes at or below 1280×720 and 24fps. On macOS, the media importer automatically converts larger or higher-frame-rate inputs to H.264 MP4 when `ffmpeg` is installed (`brew install ffmpeg`). On Windows, preprocess videos to this limit before packaging a theme; high-resolution 60fps media can otherwise add substantial decode and GPU load to Codex.
+Keep video themes at or below 1280×720 and 24fps. Both importers convert larger or higher-frame-rate inputs to H.264 MP4 using `ffmpeg` on PATH (`brew install ffmpeg` on macOS). Windows video poster generation also requires it; a missing converter leaves the current theme intact. Preprocess videos embedded in theme ZIPs to the same budget to avoid excessive decode and GPU load.
 
 ## Validation status
 
@@ -26,7 +26,7 @@ Automated tests and CI configuration are not evidence of a successful native run
 ## Quick start
 
 - macOS: run `macos/Install Codex Dream Skin.command`, then `macos/Customize Codex Dream Skin.command`. The explicit `macos/Restore Codex Dream Skin.command` launcher restores the pre-install base theme and reopens Codex when it finishes.
-- Windows: install Node.js 22 or newer, run `windows/scripts/install-dream-skin.ps1`, then use the **Codex Dream Skin** icon in the system tray (notification area) to manage themes. For a complete restore that leaves Codex closed, run `& ".\windows\scripts\restore-dream-skin.ps1" -RestoreBaseTheme -NoRelaunch` in PowerShell.
+- Windows: install Node.js 22 or newer and run `windows/scripts/install-dream-skin.ps1`. Start Codex with the generated **Codex Dream Skin** shortcut and manage themes in the theme center or system tray. To automatically inject after an ordinary launch, enable **Auto-inject on normal Codex launch (idle restart only)** and **Launch at login** in the tray. For a complete restore that leaves Codex closed, run `& ".\windows\scripts\restore-dream-skin.ps1" -RestoreBaseTheme -NoRelaunch` in PowerShell.
 
 See [macOS installation](docs/install-macos.md) and [Windows installation](docs/install-windows.md). macOS uses the signed Node.js runtime bundled with the official Codex app; Windows source installation requires Node.js 22 or newer.
 

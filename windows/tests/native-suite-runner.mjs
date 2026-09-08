@@ -6,9 +6,12 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const expectedSuites = [
+  "autostart-policy.tests.ps1",
   "config-startup-rollback.tests.ps1",
   "dynamic-v2-import.Tests.ps1",
+  "lifecycle-regressions.tests.ps1",
   "profile-scoped-stop.tests.ps1",
+  "start-autostart-safety.tests.ps1",
   "start-cdp-failure-appearance-recovery.tests.ps1",
   "start-post-launch-appearance-recovery.tests.ps1",
   "start-renderer-readiness.tests.ps1",
@@ -49,6 +52,10 @@ export function validateNativeSuiteNames(suiteNames) {
 }
 
 function main(args) {
+  const timeoutMs = Number(readOption(args, "--suite-timeout-ms", { required: false }) ?? 180000);
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 10 || timeoutMs > 600000) {
+    throw new Error('Invalid suite timeout (10..600000 milliseconds required)');
+  }
   const shell = resolve(readOption(args, "--shell"));
   const shellPrefix = readOption(args, "--shell-prefix", { required: false });
   const testsDirectory = resolve(readOption(args, "--tests-dir"));
@@ -75,7 +82,7 @@ function main(args) {
       suite,
       "-Root",
       root
-    ], { stdio: "inherit" });
+    ], { stdio: "inherit", timeout: timeoutMs });
     if (result.error) {
       failures.push(`${suite}: ${result.error.message}`);
     } else if (result.status !== 0) {

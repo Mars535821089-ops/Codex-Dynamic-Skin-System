@@ -84,6 +84,27 @@ function tinyPng() {
   );
 }
 
+test("storage display accepts absolute Mac and Windows paths but not relative or device paths", async () => {
+  const { composeDynamicPayload } = requireComposer();
+  const loadedSkin = await loadInstalledSkin(path.join(fixtureRoot, "v1-static"), {
+    platform: "windows", clientVersion: "2.0.0",
+  });
+  const input = { loadedSkin, settings: DEFAULT_DYNAMIC_SETTINGS,
+    assetUrls: deferredAssetUrls(loadedSkin.theme), revision: "storage-path-test",
+    modules: await dynamicModules() };
+  for (const storagePath of ["/opt/themes", "C:\\Users\\Example\\主题库", "D:/Themes", "\\\\server\\share\\Themes"]) {
+    const result = composeDynamicPayload({ ...input, storage: {
+      path: storagePath, available: true, custom: true, bytes: 0, themeCount: 1,
+    } });
+    assert.equal(result.config.storage.path, storagePath);
+  }
+  for (const storagePath of ["themes", "C:themes", "\\themes", "\\\\?\\C:\\Themes", "\\\\.\\pipe\\test", "\\\\server", "C:\\bad\npath"]) {
+    assert.throws(() => composeDynamicPayload({ ...input, storage: {
+      path: storagePath, available: true, custom: true, bytes: 0, themeCount: 1,
+    } }), /storage status is invalid/);
+  }
+});
+
 async function executableVideoSkin(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "codex-dynamic-injector-v2-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

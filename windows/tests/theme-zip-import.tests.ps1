@@ -21,7 +21,7 @@ $publishedMismatchIndex = $themeStoreSource.IndexOf(
   [System.StringComparison]::Ordinal
 )
 $canonicalBackupCleanupIndex = $themeStoreSource.IndexOf(
-  'Remove-DreamSkinManagedDirectoryVerified -Path $backup -Root $paths.Root',
+  'Remove-DreamSkinManagedDirectoryVerified -Path $backup -Root $paths.Saved',
   [System.StringComparison]::Ordinal
 )
 $journalPersistenceIndex = $themeStoreSource.IndexOf(

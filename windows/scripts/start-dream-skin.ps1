@@ -3,6 +3,12 @@ param(
   [int]$Port = 9335,
   [switch]$RestartExisting,
   [switch]$PromptRestart,
+  [switch]$RepairWatcherOnly,
+  [switch]$AutoRestartIdleOnly,
+  [int]$ExpectedCodexPid = 0,
+  [string]$ExpectedCodexStartedAt,
+  [int]$ParentProcessId = 0,
+  [string]$ParentStartedAt,
   [string]$ProfilePath,
   [switch]$ForegroundInjector,
   [ValidateRange(0, 300000)][int]$OperationLockTimeoutMilliseconds = 0,
@@ -76,6 +82,73 @@ function Start-DreamSkinCodexAfterRollback {
   return Start-DreamSkinCodex -Codex $Codex
 }
 
+function Assert-DreamSkinExpectedCodexProcess {
+  param([object]$Codex, [int]$ExpectedProcessId, [string]$ExpectedStartedAt)
+  if ($ExpectedProcessId -le 0 -or $ExpectedStartedAt -notmatch '(?:Z|[+-]\d{2}:\d{2})$') {
+    throw 'Automatic restart requires an exact Codex PID and timezone-qualified start time.'
+  }
+  $expectedStart = [datetimeoffset]::Parse($ExpectedStartedAt)
+  $matches = @(Get-DreamSkinCodexProcesses -Codex $Codex | Where-Object { [int]$_.ProcessId -eq $ExpectedProcessId })
+  if ($matches.Count -ne 1) { throw 'The expected Codex process is no longer active; automatic restart was cancelled.' }
+  $processHandle = $null
+  try {
+    $processHandle = Get-Process -Id $ExpectedProcessId -ErrorAction Stop
+    [void]$processHandle.Handle
+    if ($processHandle.HasExited -or
+      -not (Test-DreamSkinPathEqual -Left "$($processHandle.Path)" -Right $Codex.Executable) -or
+      $processHandle.StartTime.ToUniversalTime() -ne $expectedStart.UtcDateTime) {
+      throw 'The expected Codex process identity changed; automatic restart was cancelled.'
+    }
+  } finally {
+    if ($null -ne $processHandle) { $processHandle.Dispose() }
+  }
+}
+
+function Assert-DreamSkinAutomaticStartupParent {
+  param([int]$ProcessId, [string]$StartedAt)
+  if ($ProcessId -le 0 -or $StartedAt -notmatch '(?:Z|[+-]\d{2}:\d{2})$') {
+    throw 'Automatic startup requires an exact parent PID and timezone-qualified start time.'
+  }
+  $expectedStart = [datetimeoffset]::Parse($StartedAt)
+  $parentHandle = $null
+  try {
+    $parentHandle = Get-Process -Id $ProcessId -ErrorAction Stop
+    [void]$parentHandle.Handle
+    if ($parentHandle.HasExited -or $parentHandle.StartTime.ToUniversalTime() -ne $expectedStart.UtcDateTime) {
+      throw 'The automatic startup owner exited or changed; pending work was cancelled.'
+    }
+  } finally {
+    if ($null -ne $parentHandle) { $parentHandle.Dispose() }
+  }
+}
+
+function Assert-DreamSkinAutomaticRestartConsent {
+  param([string]$StateRoot)
+  if (-not (Test-Path -LiteralPath (Join-Path $StateRoot 'autostart-idle-restart.enabled') -PathType Leaf)) {
+    throw 'Automatic restart consent was removed; Codex was preserved.'
+  }
+}
+
+function Assert-DreamSkinAutomaticRestartIdle {
+  param([object]$Codex, [int]$ExpectedProcessId, [string]$ExpectedStartedAt,
+    [string]$NodePath, [string]$ActivityScript)
+  Assert-DreamSkinExpectedCodexProcess -Codex $Codex -ExpectedProcessId $ExpectedProcessId -ExpectedStartedAt $ExpectedStartedAt
+  $codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' }
+  $startedAtMs = ([datetimeoffset]::Parse($ExpectedStartedAt)).ToUnixTimeMilliseconds()
+  $probe = Invoke-DreamSkinNative -FilePath $NodePath -ArgumentList @(
+    $ActivityScript, '--sessions-root', (Join-Path $codexHome 'sessions'),
+    '--app-started-at-ms', "$startedAtMs") -DiscardStderr
+  if ($probe.ExitCode -ne 0) { throw 'Session activity could not be confirmed; Codex was not restarted.' }
+  $activity = ($probe.Output -join "`n") | ConvertFrom-Json -ErrorAction Stop
+  if ($null -eq $activity -or $activity -is [array] -or $activity.status -cne 'idle' -or
+    ($activity.activeCount -isnot [int] -and $activity.activeCount -isnot [long]) -or $activity.activeCount -ne 0) {
+    throw 'Codex is busy or session activity is unknown; automatic restart was deferred.'
+  }
+  # Recheck after reading sessions. The stop helper also binds its final
+  # kernel handles to this identity before sending any close request.
+  Assert-DreamSkinExpectedCodexProcess -Codex $Codex -ExpectedProcessId $ExpectedProcessId -ExpectedStartedAt $ExpectedStartedAt
+}
+
 $StateRoot = Join-Path $env:LOCALAPPDATA 'CodexDreamSkin'
 $ConfigPath = Join-Path $HOME '.codex\config.toml'
 $BackupPath = Join-Path $StateRoot 'config.before-dream-skin.toml'
@@ -86,6 +159,18 @@ $appearanceRecovery = 'not-needed'
 try {
   $operationLock = Enter-DreamSkinOperationLock `
     -TimeoutMilliseconds $OperationLockTimeoutMilliseconds
+  if ($RepairWatcherOnly -and $AutoRestartIdleOnly) { throw 'Watcher-only repair and automatic restart are mutually exclusive.' }
+  if (($RepairWatcherOnly -or $AutoRestartIdleOnly) -and ($RestartExisting -or $PromptRestart -or $ForegroundInjector)) {
+    throw 'Automatic startup cannot be combined with interactive or forced startup options.'
+  }
+  if ($AutoRestartIdleOnly -and $ProfilePath) { throw 'Automatic restart is limited to the default Codex profile.' }
+  if ($RepairWatcherOnly -or $AutoRestartIdleOnly) {
+    $RequireUnpaused = $true
+    # A queued worker loses authority when its observing tray exits. Bind the
+    # process identity again after the lock, not only when work was enqueued.
+    Assert-DreamSkinAutomaticStartupParent -ProcessId $ParentProcessId -StartedAt $ParentStartedAt
+  }
+  if ($AutoRestartIdleOnly) { Assert-DreamSkinAutomaticRestartConsent -StateRoot $StateRoot }
   Assert-DreamSkinPort -Port $Port
   if ($ProfilePath) { $ProfilePath = [System.IO.Path]::GetFullPath($ProfilePath) }
   $node = Get-DreamSkinNodeRuntime
@@ -184,12 +269,24 @@ try {
     Get-DreamSkinCodexProcesses -Codex $codexToStop -ProfilePath $ProfilePath
   }
   $closedExistingCodex = $false
+  if ($RepairWatcherOnly -and -not $debugReady) {
+    throw 'Watcher-only repair requires an existing verified CDP endpoint; Codex was not launched or restarted.'
+  }
+  if ($AutoRestartIdleOnly) {
+    Assert-DreamSkinExpectedCodexProcess -Codex $codexToStop -ExpectedProcessId $ExpectedCodexPid -ExpectedStartedAt $ExpectedCodexStartedAt
+  }
   if ($ProfilePath -and -not $debugReady -and
       ($codexProcesses.Count -gt 0 -or -not (Test-DreamSkinPortAvailable -Port $Port))) {
     throw 'The requested profile has no verified endpoint. Existing processes were preserved; use an independently verified profile and port.'
   }
   if (-not $debugReady -and $codexProcesses.Count -gt 0) {
     $restartAuthorized = [bool]$RestartExisting
+    if ($AutoRestartIdleOnly) {
+      Assert-DreamSkinAutomaticRestartIdle -Codex $codexToStop -ExpectedProcessId $ExpectedCodexPid `
+        -ExpectedStartedAt $ExpectedCodexStartedAt -NodePath $node.Path `
+        -ActivityScript (Join-Path (Split-Path -Parent $Injector) 'session-activity.mjs')
+      $restartAuthorized = $true
+    }
     if (-not $restartAuthorized -and $PromptRestart) {
       $restartAuthorized = Confirm-DreamSkinRestart -Message `
         (Get-DreamSkinText -Key 'RestartPrompt' -Language $language)
@@ -201,7 +298,13 @@ try {
     if (-not $restartAuthorized) {
       throw 'Codex is open without a verified Dream Skin CDP endpoint. Close it first or explicitly use -RestartExisting.'
     }
-    Stop-DreamSkinCodex -Codex $codexToStop -ProfilePath $ProfilePath -AllowForce
+    if ($AutoRestartIdleOnly) {
+      Assert-DreamSkinAutomaticStartupParent -ProcessId $ParentProcessId -StartedAt $ParentStartedAt
+      Assert-DreamSkinAutomaticRestartConsent -StateRoot $StateRoot
+      Stop-DreamSkinCodex -Codex $codexToStop -ExpectedProcessId $ExpectedCodexPid -ExpectedStartedAt $ExpectedCodexStartedAt
+    } else {
+      Stop-DreamSkinCodex -Codex $codexToStop -ProfilePath $ProfilePath -AllowForce
+    }
     $closedExistingCodex = $true
     $codex = $currentCodex
   }
@@ -231,6 +334,9 @@ try {
       }
     }
     if ($null -eq (Get-DreamSkinVerifiedCdpIdentity -Port $Port -Codex $codex -ProfilePath $ProfilePath)) {
+      if ($RepairWatcherOnly -or ($AutoRestartIdleOnly -and -not $closedExistingCodex)) {
+        throw 'The existing endpoint disappeared; automatic watcher repair will not relaunch Codex.'
+      }
       # Codex is closed on this path; sync the appearanceTheme pin to the
       # active theme before launching (config writes race the app while it runs).
       if (-not $ProfilePath) {
@@ -269,7 +375,7 @@ try {
       }
       $debugLaunchAttempted = $true
       $debugLaunchBaselineProcessIds = @(
-        Get-DreamSkinCodexProcesses -Codex $codex | ForEach-Object { [int]$_.ProcessId }
+        Get-DreamSkinCodexProcesses -Codex $codex -AllProfiles | ForEach-Object { [int]$_.ProcessId }
       )
       $startFailureCategory = 'cdp-launch-failed'
       $debugLaunch = Start-DreamSkinCodexForDebugging -Codex $codex -Arguments $arguments `
@@ -300,7 +406,7 @@ try {
     }
   } catch {
     $launchError = $_
-    if ($debugLaunchAttempted) {
+    if ($debugLaunchAttempted -and -not $AutoRestartIdleOnly) {
       try {
         Stop-DreamSkinCodex -Codex $codex -ProfilePath $ProfilePath `
           -PreserveProcessIds $debugLaunchBaselineProcessIds -AllowForce
@@ -318,7 +424,7 @@ try {
         Write-Warning 'Startup appearance recovery was blocked because the failed Codex process could not be confirmed closed.'
       }
     }
-    if (($closedExistingCodex -or $debugLaunchAttempted) -and $failedLaunchClosed) {
+    if (-not $AutoRestartIdleOnly -and ($closedExistingCodex -or $debugLaunchAttempted) -and $failedLaunchClosed) {
       if ($debugLaunchAttempted) {
         Write-Warning 'Dream Skin launch failed; reopening Codex without a debugging port.'
       }
@@ -332,6 +438,11 @@ try {
   $startFailureCategory = 'state-reconciliation-failed'
   $pauseCleared = $false
   try {
+    if (($RepairWatcherOnly -or $AutoRestartIdleOnly) -and -not $closedExistingCodex) {
+      Assert-DreamSkinAutomaticStartupParent -ProcessId $ParentProcessId -StartedAt $ParentStartedAt
+    }
+    # Once this operation has closed Codex, finish reopening and restoring the
+    # watcher even if the owner exits: cancellation must not strand a closed app.
     $recordedInjectorStopped = Stop-DreamSkinRecordedInjector -State $previousState
     if (-not $recordedInjectorStopped) {
       $staleStatePath = Archive-DreamSkinStateFile -Path $StatePath
@@ -342,7 +453,7 @@ try {
     Set-DreamSkinPaused -Paused $false -StateRoot $StateRoot | Out-Null
     $pauseCleared = $true
   } catch {
-    if ($launchedWithCdp) {
+    if ($launchedWithCdp -and -not $AutoRestartIdleOnly) {
       $stateRollbackClosed = $false
       try {
         Stop-DreamSkinCodex -Codex $codex -ProfilePath $ProfilePath -AllowForce
@@ -394,7 +505,8 @@ try {
       $foregroundStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
       $foregroundArgs = @($Injector, '--watch', '--port', "$Port", '--browser-id',
         $cdpIdentity.BrowserId, '--theme-dir', $themePaths.Active, '--pause-file',
-        $themePaths.PauseFile)
+        $themePaths.PauseFile, '--theme-library', $themePaths.Saved,
+        '--settings', (Join-Path $themePaths.Root 'dynamic-settings.json'))
       if ($backgroundPlaybackCapable) { $foregroundArgs += '--background-playback-capable' }
       & $node.Path @foregroundArgs
       $foregroundExitCode = $LASTEXITCODE
@@ -489,7 +601,9 @@ try {
     $injectorArgs = @((ConvertTo-DreamSkinProcessArgument -Value $Injector), '--watch', '--port', "$Port",
       '--browser-id', $cdpIdentity.BrowserId, '--theme-dir',
       (ConvertTo-DreamSkinProcessArgument -Value $themePaths.Active), '--pause-file',
-      (ConvertTo-DreamSkinProcessArgument -Value $themePaths.PauseFile))
+      (ConvertTo-DreamSkinProcessArgument -Value $themePaths.PauseFile), '--theme-library',
+      (ConvertTo-DreamSkinProcessArgument -Value $themePaths.Saved), '--settings',
+      (ConvertTo-DreamSkinProcessArgument -Value (Join-Path $themePaths.Root 'dynamic-settings.json')))
     if ($backgroundPlaybackCapable) { $injectorArgs += '--background-playback-capable' }
     $daemon = Start-Process -FilePath $node.Path -ArgumentList $injectorArgs -WindowStyle Hidden -PassThru `
       -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath
@@ -531,6 +645,7 @@ try {
       $verify = Invoke-DreamSkinNative -FilePath $node.Path -ArgumentList @(
         $Injector, '--verify', '--port', "$Port",
         '--browser-id', $cdpIdentity.BrowserId, '--theme-dir', $themePaths.Active,
+        '--theme-library', $themePaths.Saved, '--settings', (Join-Path $themePaths.Root 'dynamic-settings.json'),
         '--timeout-ms', '30000')
       Write-DreamSkinUtf8FileAtomically -Path $VerifyPath -Content (($verify.Output -join "`r`n") + "`r`n")
       if ($verify.ExitCode -eq 0) { break }
@@ -592,7 +707,7 @@ try {
       }
     }
     if ($injectorStopped) { Remove-Item -LiteralPath $StatePath -Force -ErrorAction SilentlyContinue }
-    if ($launchedWithCdp -and -not $skinLooksRendered) {
+    if ($launchedWithCdp -and -not $skinLooksRendered -and -not $AutoRestartIdleOnly) {
       $rendererRollbackClosed = $false
       try {
         Stop-DreamSkinCodex -Codex $codex -ProfilePath $ProfilePath -AllowForce
@@ -610,7 +725,7 @@ try {
         if ($null -ne $appearanceTransaction) { $appearanceRecovery = 'blocked' }
         Write-Warning 'Startup rollback could not fully close Codex; close Codex to ensure its CDP port is closed.'
       }
-    } elseif ($skinLooksRendered -and $ResultToken -and $launchedWithCdp -and
+    } elseif (-not $AutoRestartIdleOnly -and $skinLooksRendered -and $ResultToken -and $launchedWithCdp -and
       $null -ne $appearanceTransaction) {
       # One-click apply has a parent theme-file transaction. Leaving the new
       # appearance/session alive would make any parent file rollback produce a

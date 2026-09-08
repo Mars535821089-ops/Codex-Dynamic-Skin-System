@@ -37,7 +37,7 @@ function Show-DreamSkinBootstrapMessage {
 function Wait-DreamSkinCodexClosedForSetup {
   while ($true) {
     $registered = @(Get-DreamSkinRegisteredCodexInstalls)
-    $running = @($registered | Where-Object { (Get-DreamSkinCodexProcesses -Codex $_).Count -gt 0 })
+    $running = @($registered | Where-Object { (Get-DreamSkinCodexProcesses -Codex $_ -AllProfiles).Count -gt 0 })
     if ($running.Count -eq 0) { return }
     if ($Silent) { throw 'Close Codex before installing or updating Codex Dream Skin.' }
     Add-Type -AssemblyName System.Windows.Forms

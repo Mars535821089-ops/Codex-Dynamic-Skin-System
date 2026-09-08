@@ -33,7 +33,7 @@ test("one manifest covers every Windows runtime dependency and packaged-only fil
   const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
   assert.equal(manifest.schema, "codex-dream-skin-runtime-files/1");
 
-  const actualRuntimeFiles = ["VERSION"];
+  const actualRuntimeFiles = ["VERSION", "repository.json"];
   for (const directory of ["assets", "presets", "scripts"]) {
     actualRuntimeFiles.push(...await listFiles(windowsRoot, directory));
   }

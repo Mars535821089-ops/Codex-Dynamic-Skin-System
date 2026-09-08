@@ -241,14 +241,11 @@ assert.match(source, /queue\?\.request\("Page\.loadEventFired", \{ delayMs: 250 
   "Repeated page lifecycle events must flow through the coalescing recovery queue.");
 assert.match(source, /Page\.removeScriptToEvaluateOnNewDocument/,
   "Watcher shutdown and theme refresh must unregister persistent Page scripts.");
-assert.match(source,
-  /validateThemeActionRequest[\s\S]*__CODEX_DYNAMIC_SKIN_ACTION_REQUEST__[\s\S]*restore-default-theme/,
-  "Windows watcher must consume and validate the Theme Center native-restore action.");
 assert.match(source, /readThemeSelection[\s\S]*writeThemeSelection/,
   "Windows watcher must persist native/theme display mode across renderer reloads.");
-assert.match(source, /__CODEX_DYNAMIC_SKIN_THEME_REQUEST__[\s\S]*displayMode === "native"/,
-  "Windows watcher must let the current theme leave native mode without restarting Codex.");
-assert.match(source, /sourceApiVersion === 2[\s\S]*loadPayload\(options\.themeDir, null/,
+// Native restore and library selections are now exercised as real controller
+// behavior in theme-library-controller.test.mjs, not inlined-source regexes.
+assert.match(source, /sourceApiVersion === 2[\s\S]*loadWatchedPayload\(selectedThemeDir, displayMode/,
   "Windows strong audit must reload v2 themes through the v2 loader.");
 
 console.log("PASS: Windows early injection is L0-ready, generation-safe, ordered before probing, and fallback-scoped.");

@@ -168,7 +168,8 @@ try {
         (Join-Path $desktop 'Codex Dream Skin - Restore.lnk'),
         (Join-Path $desktop 'Codex Dream Skin - Tray.lnk'),
         (Join-Path $startMenu 'Codex Dream Skin.lnk'),
-        (Join-Path $startMenu 'Codex Dream Skin - Tray.lnk')
+        (Join-Path $startMenu 'Codex Dream Skin - Tray.lnk'),
+        (Join-Path ([Environment]::GetFolderPath('Startup')) 'Codex Dream Skin.lnk')
       ) | ForEach-Object { Remove-Item -LiteralPath $_ -Force -ErrorAction SilentlyContinue }
       if (Test-Path -LiteralPath $engine.Root) {
         # A restore launched by the installed shortcut starts inside engine\.

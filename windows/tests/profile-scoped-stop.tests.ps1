@@ -16,6 +16,7 @@ $profileA = Join-Path $fixtureRoot 'profile A'
 $profileB = Join-Path $fixtureRoot 'profile B'
 $processA = $null
 $processB = $null
+$processDefault = $null
 try {
   New-Item -ItemType Directory -Force -Path $fixtureRoot, $profileA, $profileB | Out-Null
   $stateA = [pscustomobject]@{ profilePath = $profileA }
@@ -56,16 +57,19 @@ public static class Program {
     -ArgumentList ('"--user-data-dir=' + $profileA + '"') -PassThru
   $processB = Start-Process -FilePath $fixtureExecutable `
     -ArgumentList ('"--user-data-dir=' + $profileB + '"') -PassThru
+  $processDefault = Start-Process -FilePath $fixtureExecutable -PassThru
   $codex = [pscustomobject]@{ Executable = $fixtureExecutable }
 
   $deadline = (Get-Date).AddSeconds(10)
   do {
     $matchingA = @(Get-DreamSkinCodexProcesses -Codex $codex -ProfilePath $profileA)
     $matchingB = @(Get-DreamSkinCodexProcesses -Codex $codex -ProfilePath $profileB)
-    if ($matchingA.Count -eq 1 -and $matchingB.Count -eq 1) { break }
+    $matchingDefault = @(Get-DreamSkinCodexProcesses -Codex $codex)
+    if ($matchingA.Count -eq 1 -and $matchingB.Count -eq 1 -and $matchingDefault.Count -eq 1) { break }
     Start-Sleep -Milliseconds 100
   } while ((Get-Date) -lt $deadline)
-  if ($matchingA.Count -ne 1 -or $matchingB.Count -ne 1) {
+  if ($matchingA.Count -ne 1 -or $matchingB.Count -ne 1 -or
+    $matchingDefault.Count -ne 1 -or $matchingDefault[0].ProcessId -ne $processDefault.Id) {
     throw 'The disposable fixture processes were not discovered with distinct profiles.'
   }
 
@@ -74,9 +78,16 @@ public static class Program {
   $processB.Refresh()
   if (-not $processA.HasExited) { throw 'The selected fixture profile was not stopped.' }
   if ($processB.HasExited) { throw 'The unselected fixture profile was stopped.' }
-  Write-Output 'PASS: profile-scoped stop closed one disposable fixture and preserved the other.'
+  $processDefault.Refresh()
+  if ($processDefault.HasExited) { throw 'Explicit-profile stop closed the default fixture.' }
+  Stop-DreamSkinCodex -Codex $codex -AllowForce
+  $processDefault.Refresh()
+  $processB.Refresh()
+  if (-not $processDefault.HasExited) { throw 'Default-profile stop did not close its fixture.' }
+  if ($processB.HasExited) { throw 'Default-profile stop closed an explicit fixture.' }
+  Write-Output 'PASS: explicit and default profile stops preserved the other disposable profiles.'
 } finally {
-  foreach ($fixtureProcess in @($processA, $processB)) {
+  foreach ($fixtureProcess in @($processA, $processB, $processDefault)) {
     if ($null -eq $fixtureProcess) { continue }
     try {
       if (-not $fixtureProcess.HasExited) { $fixtureProcess.Kill() }

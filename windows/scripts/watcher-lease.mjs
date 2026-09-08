@@ -23,35 +23,44 @@ function processIsAlive(pid) {
   }
 }
 
-async function readProcessIdentity(pid) {
-  if (!processIsAlive(pid)) return null;
+export async function readProcessIdentity(pid, { platform = process.platform,
+  execute = execFileAsync, isAlive = processIsAlive } = {}) {
+  if (!isAlive(pid)) return null;
   try {
-    if (process.platform === "win32") {
+    if (platform === "win32") {
       const script = [
+        "$ErrorActionPreference = 'Stop'",
+        "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)",
         `$p = Get-CimInstance Win32_Process -Filter \"ProcessId = ${pid}\"`,
         `$q = Get-Process -Id ${pid} -ErrorAction Stop`,
         `if ($null -eq $p) { exit 3 }`,
         `[pscustomobject]@{ processStartedAt = $q.StartTime.ToUniversalTime().ToString('o'); executablePath = $p.ExecutablePath; commandLine = $p.CommandLine } | ConvertTo-Json -Compress`,
       ].join("; ");
-      const result = await execFileAsync("powershell.exe", [
+      const executable = path.win32.join(process.env.SystemRoot || "C:\\Windows", "System32",
+        "WindowsPowerShell", "v1.0", "powershell.exe");
+      const result = await execute(executable, [
         "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script,
       ], { encoding: "utf8", timeout: 2000, windowsHide: true });
       const parsed = JSON.parse(result.stdout.trim());
-      return parsed?.processStartedAt && parsed?.commandLine ? parsed : null;
+      if (!parsed?.processStartedAt || !parsed?.commandLine) throw new Error("Incomplete process identity");
+      return parsed;
     }
     const [started, command] = await Promise.all([
-      execFileAsync("/bin/ps", ["-p", String(pid), "-o", "lstart="], {
+      execute("/bin/ps", ["-p", String(pid), "-o", "lstart="], {
         encoding: "utf8", timeout: 1500,
       }),
-      execFileAsync("/bin/ps", ["-p", String(pid), "-o", "command="], {
+      execute("/bin/ps", ["-p", String(pid), "-o", "command="], {
         encoding: "utf8", timeout: 1500,
       }),
     ]);
     const processStartedAt = started.stdout.trim().replace(/\s+/g, " ");
     const commandLine = command.stdout.trim();
-    return processStartedAt && commandLine
-      ? { processStartedAt, executablePath: null, commandLine } : null;
-  } catch {
+    if (!processStartedAt || !commandLine) throw new Error("Incomplete process identity");
+    return { processStartedAt, executablePath: null, commandLine };
+  } catch (error) {
+    // A slow/denied CIM query is not proof the owner exited. Reclaiming the
+    // lease here would permit concurrent watchers and recurring reinjection.
+    if (isAlive(pid)) throw new Error(`Could not verify live watcher process identity: ${error.message}`);
     return null;
   }
 }
@@ -131,8 +140,10 @@ export async function acquireWatcherLease({
   }
   const token = randomUUID();
   for (let attempt = 0; attempt < 3; attempt += 1) {
+    let created = false;
     try {
       await fs.mkdir(lockPath, { mode: 0o700 });
+      created = true;
       const owner = {
         schema: "codex-dream-skin-watcher-owner/2",
         pid,
@@ -162,7 +173,7 @@ export async function acquireWatcherLease({
       });
     } catch (error) {
       if (error?.code !== "EEXIST") {
-        await fs.rm(lockPath, { recursive: true, force: true }).catch(() => {});
+        if (created) await fs.rm(lockPath, { recursive: true, force: true }).catch(() => {});
         throw error;
       }
       const state = await removeIfStale(lockPath, inspectProcess);

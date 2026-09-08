@@ -285,17 +285,33 @@ function Stop-DreamSkinTrayProcess {
       if ($process.ProcessId -eq $PID -or -not $process.CommandLine) { continue }
       $matchesTray = $false
       foreach ($scriptPath in $normalized) {
-        if ($process.CommandLine.IndexOf($scriptPath, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        if (Test-DreamSkinPowerShellFileCommand -CommandLine $process.CommandLine -ScriptPath $scriptPath) {
           $matchesTray = $true
           break
         }
       }
       if (-not $matchesTray) { continue }
+      $processHandle = $null
       try {
-        Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
-        Wait-Process -Id $process.ProcessId -Timeout 5 -ErrorAction SilentlyContinue
+        $processHandle = Get-Process -Id $process.ProcessId -ErrorAction Stop
+        [void]$processHandle.Handle
+        if ($processHandle.HasExited) { continue }
+        $recordedPath = Get-DreamSkinProcessExecutablePath -ProcessInfo $process
+        $boundPath = "$($processHandle.Path)"
+        if (-not $recordedPath -or -not $boundPath -or
+          -not (Test-DreamSkinPathEqual -Left $recordedPath -Right $boundPath) -or
+          $null -eq $process.CreationDate -or
+          [Math]::Abs(($processHandle.StartTime.ToUniversalTime() -
+            ([datetime]$process.CreationDate).ToUniversalTime()).TotalMilliseconds) -gt 1000) {
+          throw 'The tray process identity changed before it could be stopped.'
+        }
+        Stop-Process -InputObject $processHandle -Force -ErrorAction Stop
+        [void]$processHandle.WaitForExit(5000)
+        if (-not $processHandle.HasExited) { throw 'The tray process did not stop.' }
       } catch {
         $failures += "PID $($process.ProcessId): $($_.Exception.Message)"
+      } finally {
+        if ($null -ne $processHandle) { $processHandle.Dispose() }
       }
     }
   } catch {
@@ -512,6 +528,62 @@ function Test-DreamSkinCommandLineToken {
   return [regex]::IsMatch($CommandLine, $pattern)
 }
 
+function ConvertFrom-DreamSkinProcessCommandLine {
+  param([Parameter(Mandatory = $true)][string]$CommandLine)
+  if (-not ('DreamSkin.NativeCommandLine' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace DreamSkin {
+  public static class NativeCommandLine {
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CommandLineToArgvW(string commandLine, out int argc);
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr LocalFree(IntPtr memory);
+    public static string[] Parse(string commandLine) {
+      int count;
+      IntPtr memory = CommandLineToArgvW(commandLine, out count);
+      if (memory == IntPtr.Zero) throw new InvalidOperationException("Cannot decode process arguments.");
+      try {
+        var result = new string[count];
+        for (int i = 0; i < count; i++)
+          result[i] = Marshal.PtrToStringUni(Marshal.ReadIntPtr(memory, i * IntPtr.Size));
+        return result;
+      } finally { LocalFree(memory); }
+    }
+  }
+}
+'@ | Out-Null
+  }
+  return ,([DreamSkin.NativeCommandLine]::Parse($CommandLine))
+}
+
+function Test-DreamSkinPowerShellFileCommand {
+  param([string]$CommandLine, [string]$ScriptPath)
+  if (-not $CommandLine -or -not $ScriptPath) { return $false }
+  try {
+    $arguments = ConvertFrom-DreamSkinProcessCommandLine -CommandLine $CommandLine
+    # Only -File invokes a tray. Text embedded in -Command or passed as an
+    # argument to another script is never authority to terminate that process.
+    for ($index = 1; $index -lt $arguments.Length; $index++) {
+      if ($arguments[$index] -ieq '-File') {
+        return ($index + 1 -lt $arguments.Length) -and
+          (Test-DreamSkinPathEqual -Left $arguments[$index + 1] -Right $ScriptPath)
+      }
+      if ($arguments[$index] -in @('-NoLogo', '-NoProfile', '-NonInteractive', '-STA', '-MTA')) { continue }
+      if ($arguments[$index] -in @('-WindowStyle', '-ExecutionPolicy', '-InputFormat', '-OutputFormat')) {
+        $index++
+        if ($index -ge $arguments.Length) { return $false }
+        continue
+      }
+      # Unknown options include abbreviated/encoded command modes. Refuse
+      # them instead of searching their payload for something resembling -File.
+      return $false
+    }
+  } catch {}
+  return $false
+}
+
 function Test-DreamSkinBackgroundPlaybackEnabled {
   param([Parameter(Mandatory = $true)][string]$StateRoot)
   $settingsPath = Join-Path $StateRoot 'dynamic-settings.json'
@@ -600,12 +672,15 @@ function ConvertTo-DreamSkinArgumentLine {
 function Get-DreamSkinProcessExecutablePath {
   param([Parameter(Mandatory = $true)][object]$ProcessInfo)
   if ($ProcessInfo.ExecutablePath) { return "$($ProcessInfo.ExecutablePath)" }
+  $process = $null
   try {
     $process = Get-Process -Id ([int]$ProcessInfo.ProcessId) -ErrorAction Stop
     if ($process.Path) { return "$($process.Path)" }
     return "$($process.MainModule.FileName)"
   } catch {
     return $null
+  } finally {
+    if ($null -ne $process) { $process.Dispose() }
   }
 }
 
@@ -966,7 +1041,7 @@ function Start-DreamSkinCodexForDebugging {
   $preservedProcessIds = if ($PSBoundParameters.ContainsKey('PreserveProcessIds')) {
     @($PreserveProcessIds)
   } else {
-    @(Get-DreamSkinCodexProcesses -Codex $Codex | ForEach-Object { [int]$_.ProcessId })
+    @(Get-DreamSkinCodexProcesses -Codex $Codex -AllProfiles | ForEach-Object { [int]$_.ProcessId })
   }
   $packageProcessId = Start-DreamSkinCodex -Codex $Codex -Arguments $Arguments
   $packageStatus = Wait-DreamSkinCodexDebugArgumentStatus -Codex $Codex -Port $Port -ProfilePath $ProfilePath
@@ -1183,37 +1258,11 @@ function Test-DreamSkinPortAvailable {
 
 function Test-DreamSkinProcessProfile {
   param([object]$ProcessInfo, [string]$ProfilePath)
-  if (-not $ProfilePath) { return $true }
   if ($null -eq $ProcessInfo -or -not $ProcessInfo.CommandLine) { return $false }
   try {
     # Use Windows argument decoding, not substring matches: another argument
     # may contain the requested directory without selecting that profile.
-    if (-not ('DreamSkin.NativeCommandLine' -as [type])) {
-      Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-namespace DreamSkin {
-  public static class NativeCommandLine {
-    [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern IntPtr CommandLineToArgvW(string commandLine, out int argc);
-    [DllImport("kernel32.dll")]
-    private static extern IntPtr LocalFree(IntPtr memory);
-    public static string[] Parse(string commandLine) {
-      int count;
-      IntPtr memory = CommandLineToArgvW(commandLine, out count);
-      if (memory == IntPtr.Zero) throw new InvalidOperationException("Cannot decode process arguments.");
-      try {
-        var result = new string[count];
-        for (int i = 0; i < count; i++)
-          result[i] = Marshal.PtrToStringUni(Marshal.ReadIntPtr(memory, i * IntPtr.Size));
-        return result;
-      } finally { LocalFree(memory); }
-    }
-  }
-}
-'@ | Out-Null
-    }
-    $arguments = [DreamSkin.NativeCommandLine]::Parse([string]$ProcessInfo.CommandLine)
+    $arguments = ConvertFrom-DreamSkinProcessCommandLine -CommandLine ([string]$ProcessInfo.CommandLine)
     $profiles = @()
     for ($index = 1; $index -lt $arguments.Length; $index++) {
       $argument = $arguments[$index]
@@ -1226,6 +1275,7 @@ namespace DreamSkin {
         $profiles += $argument.Substring('--user-data-dir='.Length)
       }
     }
+    if (-not $ProfilePath) { return $profiles.Count -eq 0 }
     if ($profiles.Count -ne 1 -or [string]::IsNullOrWhiteSpace($profiles[0])) { return $false }
     # Relative and drive-relative process arguments cannot be resolved using
     # the injector's working directory; refuse rather than guess the app cwd.
@@ -1379,22 +1429,30 @@ function Archive-DreamSkinStateFile {
 
 function Get-DreamSkinProcessStartedAt {
   param([int]$ProcessId)
+  $processHandle = $null
   try {
-    return (Get-Process -Id $ProcessId -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')
+    $processHandle = Get-Process -Id $ProcessId -ErrorAction Stop
+    return $processHandle.StartTime.ToUniversalTime().ToString('o')
   } catch {
     return $null
+  } finally {
+    if ($null -ne $processHandle) { $processHandle.Dispose() }
   }
 }
 
-function Stop-DreamSkinRecordedInjector {
+function Get-DreamSkinRecordedInjectorHandle {
   param([AllowNull()][object]$State)
-  if ($null -eq $State -or -not $State.injectorPid) { return $true }
+  if ($null -eq $State -or -not $State.injectorPid) { return $null }
   $processId = [int]$State.injectorPid
   $processHandle = Get-Process -Id $processId -ErrorAction SilentlyContinue
-  if (-not $processHandle) { return $true }
+  if (-not $processHandle) { return $null }
+  $returnHandle = $false
+  try {
+  [void]$processHandle.Handle
+  if ($processHandle.HasExited) { return $null }
   $process = Get-CimInstance Win32_Process -Filter "ProcessId = $processId" -ErrorAction SilentlyContinue
   if (-not $process) {
-    if ($processHandle.HasExited) { return $true }
+    if ($processHandle.HasExited) { return $null }
     throw "The recorded injector PID $processId is running, but its identity cannot be inspected. State was preserved."
   }
 
@@ -1411,6 +1469,7 @@ function Stop-DreamSkinRecordedInjector {
     throw "The recorded injector PID $processId is running, but its identity cannot be inspected. State was preserved."
   }
   $isNodeExecutable = [System.IO.Path]::GetFileName("$processPath") -ieq 'node.exe'
+  $boundPathMatches = Test-DreamSkinPathEqual -Left "$($processHandle.Path)" -Right $processPath
   $nodeMatches = -not $State.nodePath -or
     (Test-DreamSkinPathEqual -Left $processPath -Right "$($State.nodePath)")
   $injectorMatches = [bool]($expectedInjector -and
@@ -1429,35 +1488,92 @@ function Stop-DreamSkinRecordedInjector {
   try {
     $startedAt = $processHandle.StartTime.ToUniversalTime().ToString('o')
   } catch {
-    if ($processHandle.HasExited) { return $true }
+    if ($processHandle.HasExited) { return $null }
     throw "The recorded injector PID $processId is running, but its start time cannot be inspected. State was preserved."
   }
   $startMatches = -not $State.injectorStartedAt -or $startedAt -eq "$($State.injectorStartedAt)"
-  $identityMatches = [bool]($isNodeExecutable -and $nodeMatches -and $injectorMatches -and $startMatches)
+  $identityMatches = [bool]($isNodeExecutable -and $boundPathMatches -and $nodeMatches -and $injectorMatches -and $startMatches)
 
   if (-not $identityMatches) {
     throw "The recorded injector PID $processId is running, but its visible identity does not match the saved Dream Skin process. State was preserved."
   }
 
-  Stop-Process -InputObject $processHandle -Force -ErrorAction Stop
-  [void]$processHandle.WaitForExit(15000)
-  if (-not $processHandle.HasExited) {
-    throw "The recorded Dream Skin injector did not stop: PID $processId"
+  $returnHandle = $true
+  return $processHandle
+  } finally {
+    if (-not $returnHandle) { $processHandle.Dispose() }
   }
-  return $true
+}
+
+function Test-DreamSkinRecordedInjectorAlive {
+  param([AllowNull()][object]$State)
+  if ($null -eq $State -or -not $State.injectorStartedAt -or -not $State.browserId -or
+    -not $State.nodePath -or -not $State.injectorPath) { return $false }
+  $processHandle = $null
+  try {
+    $processHandle = Get-DreamSkinRecordedInjectorHandle -State $State
+    return $null -ne $processHandle -and -not $processHandle.HasExited
+  } catch { return $false } finally {
+    if ($null -ne $processHandle) { $processHandle.Dispose() }
+  }
+}
+
+function Stop-DreamSkinRecordedInjector {
+  param([AllowNull()][object]$State)
+  $processHandle = Get-DreamSkinRecordedInjectorHandle -State $State
+  if ($null -eq $processHandle) { return $true }
+  try {
+    if (-not $processHandle.HasExited) {
+      Stop-Process -InputObject $processHandle -Force -ErrorAction Stop
+      [void]$processHandle.WaitForExit(15000)
+    }
+    if (-not $processHandle.HasExited) {
+      throw "The recorded Dream Skin injector did not stop: PID $($State.injectorPid)"
+    }
+    return $true
+  } finally { $processHandle.Dispose() }
 }
 
 function Get-DreamSkinCodexProcesses {
   param(
     [Parameter(Mandatory = $true)][object]$Codex,
-    [string]$ProfilePath
+    [string]$ProfilePath,
+    [switch]$AllProfiles
   )
-  return @(Get-CimInstance Win32_Process -Filter "Name = 'ChatGPT.exe'" -ErrorAction SilentlyContinue |
+  $processes = @(Get-CimInstance Win32_Process -Filter "Name = 'ChatGPT.exe'" -ErrorAction SilentlyContinue |
     Where-Object {
       $processPath = Get-DreamSkinProcessExecutablePath -ProcessInfo $_
-      (Test-DreamSkinPathEqual -Left $processPath -Right $Codex.Executable) -and
-        (Test-DreamSkinProcessProfile -ProcessInfo $_ -ProfilePath $ProfilePath)
+      Test-DreamSkinPathEqual -Left $processPath -Right $Codex.Executable
     })
+  if ($AllProfiles) { return $processes }
+
+  # Chromium children often omit --user-data-dir. Select browser roots first,
+  # then inherit membership through parent PIDs so a default-profile operation
+  # cannot select the renderer belonging to a separate explicit profile.
+  $selected = @{}
+  $children = @{}
+  foreach ($process in $processes) {
+    if (-not $process.CommandLine) { continue }
+    try { $arguments = ConvertFrom-DreamSkinProcessCommandLine -CommandLine $process.CommandLine } catch { continue }
+    $isChild = @($arguments | Where-Object { $_ -ceq '--type' -or $_.StartsWith('--type=', [StringComparison]::Ordinal) }).Count -gt 0
+    if ($isChild) { $children[[int]$process.ProcessId] = $true }
+    if (-not $isChild -and (Test-DreamSkinProcessProfile -ProcessInfo $process -ProfilePath $ProfilePath)) {
+      $selected[[int]$process.ProcessId] = $true
+    }
+  }
+  $changed = $true
+  while ($changed) {
+    $changed = $false
+    foreach ($process in $processes) {
+      $processId = [int]$process.ProcessId
+      if ($children.ContainsKey($processId) -and -not $selected.ContainsKey($processId) -and
+        $selected.ContainsKey([int]$process.ParentProcessId)) {
+        $selected[$processId] = $true
+        $changed = $true
+      }
+    }
+  }
+  return @($processes | Where-Object { $selected.ContainsKey([int]$_.ProcessId) })
 }
 
 function Get-DreamSkinCodexProcessesExcept {
@@ -1482,10 +1598,16 @@ function Stop-DreamSkinCodex {
     [Parameter(Mandatory = $true)][object]$Codex,
     [string]$ProfilePath,
     [AllowEmptyCollection()][int[]]$PreserveProcessIds = @(),
+    [int]$ExpectedProcessId = 0,
+    [string]$ExpectedStartedAt,
     [switch]$AllowForce
   )
   $processes = Get-DreamSkinCodexProcessesExcept -Codex $Codex -ProfilePath $ProfilePath `
     -PreserveProcessIds $PreserveProcessIds
+  if ($ExpectedProcessId -gt 0 -and
+    @($processes | Where-Object { [int]$_.ProcessId -eq $ExpectedProcessId }).Count -ne 1) {
+    throw 'The expected Codex process is no longer active; automatic restart was cancelled.'
+  }
   if ($processes.Count -eq 0) { return }
   $processHandles = @()
   try {
@@ -1517,6 +1639,14 @@ function Stop-DreamSkinCodex {
         $processHandle = $null
       } finally {
         if ($null -ne $processHandle) { $processHandle.Dispose() }
+      }
+    }
+    if ($ExpectedProcessId -gt 0) {
+      $expectedHandles = @($processHandles | Where-Object { $_.Id -eq $ExpectedProcessId })
+      if ($expectedHandles.Count -ne 1 -or $expectedHandles[0].HasExited -or
+        -not $ExpectedStartedAt -or
+        $expectedHandles[0].StartTime.ToUniversalTime() -ne ([datetimeoffset]::Parse($ExpectedStartedAt)).UtcDateTime) {
+        throw 'The expected Codex process identity changed; automatic restart was cancelled.'
       }
     }
     if ($processHandles.Count -eq 0) { return }

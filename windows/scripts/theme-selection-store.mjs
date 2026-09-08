@@ -4,12 +4,12 @@ import path from "node:path";
 const SCHEMA = "codex-dream-skin-selected-theme/2";
 const LEGACY_SCHEMA = "codex-dream-skin-selected-theme/1";
 const MODES = new Set(["theme", "native"]);
-const THEME_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
+const THEME_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const ACCEPTANCE_THEME_ID = /^acceptance\./i;
 const MAX_SELECTION_BYTES = 1024;
 
-export function themeSelectionPath({ pauseFile = null, themeDir = null } = {}) {
-  const anchor = pauseFile || themeDir;
+export function themeSelectionPath({ pauseFile = null, themeDir = null, settingsPath = null, themeLibrary = null } = {}) {
+  const anchor = settingsPath || pauseFile || themeLibrary || themeDir;
   return anchor ? path.join(path.dirname(path.resolve(anchor)), "selected-theme.json") : null;
 }
 

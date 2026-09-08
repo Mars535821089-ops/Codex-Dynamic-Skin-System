@@ -12,7 +12,7 @@ import { decodeAndValidateSafeCss } from "../assets/safe-css-validator.mjs";
 import { collectThemeAssetPaths } from "../assets/dynamic/theme-contract.mjs";
 import { createAssetHost } from "../assets/dynamic/asset-host.mjs";
 import { loadInstalledSkin } from "../assets/dynamic/theme-loader.mjs";
-import { DEFAULT_DYNAMIC_SETTINGS } from "../assets/dynamic/settings.mjs";
+import { DEFAULT_DYNAMIC_SETTINGS, parseDynamicSettings, serializeDynamicSettings } from "../assets/dynamic/settings.mjs";
 import { composeDynamicPayload } from "../assets/dynamic/payload-composer.mjs";
 import { loadVersionedDynamicModuleBundle } from "../assets/dynamic/module-bundle-loader.mjs";
 import { createRendererRecoveryQueue } from "./renderer-recovery-queue.mjs";
@@ -27,6 +27,9 @@ import {
   themeSelectionPath,
   writeThemeSelection,
 } from "./theme-selection-store.mjs";
+import { inspectThemeStorage, readThemeStoragePreference, themeStoragePreferencePath } from "./theme-storage-actions.mjs";
+import { createThemeLibraryController } from "./theme-library-controller.mjs";
+import { createThemeThumbnailDataUrl } from "./theme-library-actions.mjs";
 
 const scriptPath = fileURLToPath(import.meta.url);
 const here = path.dirname(scriptPath);
@@ -183,6 +186,8 @@ export function parseArgs(argv) {
     reload: false,
     browserId: null,
     themeDir: path.join(root, "assets"),
+    themeLibrary: null,
+    settings: null,
     pauseFile: null,
     operationKind: null,
     operationUiState: null,
@@ -203,6 +208,8 @@ export function parseArgs(argv) {
     else if (arg === "--timeout-ms") options.timeoutMs = Number(argv[++i]);
     else if (arg === "--browser-id") options.browserId = argv[++i];
     else if (arg === "--theme-dir") options.themeDir = path.resolve(argv[++i]);
+    else if (arg === "--theme-library") options.themeLibrary = path.resolve(argv[++i]);
+    else if (arg === "--settings") options.settings = path.resolve(argv[++i]);
     else if (arg === "--pause-file") options.pauseFile = path.resolve(argv[++i]);
     else if (arg === "--screenshot") options.screenshot = path.resolve(argv[++i]);
     else if (arg === "--operation-kind") options.operationKind = argv[++i];
@@ -676,7 +683,8 @@ async function selectedSkinApiVersion(themeDir) {
 }
 
 async function resolveV2PosterPath(themeDir, theme) {
-  const relative = theme.visual.kind === "image" ? theme.visual.asset
+  const relative = theme.visual.kind === "image"
+    ? (/\.gif$/i.test(theme.visual.asset) ? null : theme.visual.asset)
     : theme.visual.kind === "video" ? theme.visual.poster
       : theme.visual.fallback.poster;
   const base = relative ? themeDir : path.join(root, "assets");
@@ -765,12 +773,18 @@ async function loadV2Payload(themeDir, {
   backgroundPlaybackSupport = "restart-required",
   displayMode = "theme",
   assetHost = null,
+  themeCatalog = [],
+  settings = DEFAULT_DYNAMIC_SETTINGS,
+  settingsAuthority = "renderer-local",
+  storage,
+  installedSkin = null,
 } = {}) {
   const [loadedSkin, modules] = await Promise.all([
-    loadInstalledSkin(themeDir, { platform: "windows", clientVersion: "2.0.0" }),
+    installedSkin ?? loadInstalledSkin(themeDir, { platform: "windows", clientVersion: "2.0.0" }),
     loadDynamicModuleBundle(root),
   ]);
-  if (loadedSkin.sourceApiVersion !== 2) throw new Error("Dynamic payload requires Skin API v2");
+  const runtimeFingerprint = JSON.stringify({ themeCatalog, settings: serializeDynamicSettings(settings),
+    settingsAuthority, storage });
   const assetPaths = collectThemeAssetPaths(loadedSkin.theme);
   const deferredAssetUrls = () => Object.fromEntries(assetPaths.map((asset, index) => [
     asset, `dream-skin-deferred://asset/${index}`,
@@ -781,10 +795,10 @@ async function loadV2Payload(themeDir, {
     const revision = appendDynamicModuleRevision(
       createHash("sha256").update(SKIN_VERSION).update(loadedSkin.fingerprint), modules,
     )
-      .update(backgroundPlaybackSupport).update(displayMode)
+      .update(backgroundPlaybackSupport).update(displayMode).update(runtimeFingerprint)
       .digest("hex").slice(0, 20);
     const dynamicPayload = composeDynamicPayload({
-      loadedSkin, settings: DEFAULT_DYNAMIC_SETTINGS, assetUrls, revision, modules,
+      loadedSkin, settings, settingsAuthority, themeCatalog, storage, assetUrls, revision, modules,
       backgroundPlaybackSupport, displayMode, activation: "deferred",
     });
     const payload = dynamicPayload.source;
@@ -821,7 +835,7 @@ async function loadV2Payload(themeDir, {
     createHash("sha256").update(SKIN_VERSION).update(loadedSkin.fingerprint)
       .update(combinedCss).update(template),
     modules,
-  ).update(backgroundPlaybackSupport).update(displayMode)
+  ).update(backgroundPlaybackSupport).update(displayMode).update(runtimeFingerprint)
     .digest("hex").slice(0, 20);
   const legacyPayload = template
     .replace("__DREAM_SKIN_CSS_JSON__", () => JSON.stringify(combinedCss))
@@ -841,7 +855,7 @@ async function loadV2Payload(themeDir, {
       activation = "active";
     }
     const dynamicPayload = composeDynamicPayload({
-      loadedSkin, settings: DEFAULT_DYNAMIC_SETTINGS, assetUrls, revision, modules,
+      loadedSkin, settings, settingsAuthority, themeCatalog, storage, assetUrls, revision, modules,
       backgroundPlaybackSupport, displayMode, activation,
     });
     const payload = `${legacyPayload}\n${dynamicPayload.source}`;
@@ -938,6 +952,108 @@ function dynamicRuntimeForOptions(options) {
     backgroundPlaybackSupport: options.backgroundPlaybackCapable ? "supported" : "restart-required",
     assetHost: options.assetHost ?? null,
   };
+}
+
+export function normalizeLegacySkinIdentity(loadedSkin) {
+  if (loadedSkin.sourceApiVersion === 2) return loadedSkin;
+  // The original v1 id is arbitrary display text, not the v2 reverse-domain id.
+  // Keep the mapping stable across directory moves without modifying user files.
+  const id = `local.legacy.${createHash("sha256").update(loadedSkin.theme.id).update(loadedSkin.fingerprint).digest("hex").slice(0, 24)}`;
+  return { ...loadedSkin, theme: { ...loadedSkin.theme, id } };
+}
+
+const thumbnailCache = new Map();
+const catalogCache = new Map();
+async function catalogEntry(themeDir, loadedSkin) {
+  const theme = loadedSkin.theme;
+  const entry = { id: theme.id, name: theme.name, kind: theme.visual.kind,
+    hasAudio: theme.audio.ambient.source !== "none" || Object.keys(theme.audio.ui.events).length > 0 };
+  const key = `${themeDir}\0${loadedSkin.fingerprint}`;
+  if (!thumbnailCache.has(key)) {
+    if (thumbnailCache.size >= 256) thumbnailCache.delete(thumbnailCache.keys().next().value);
+    thumbnailCache.set(key, await createThemeThumbnailDataUrl(themeDir, theme).catch(() => null));
+  }
+  if (thumbnailCache.get(key)) entry.thumbnail = thumbnailCache.get(key);
+  return entry;
+}
+
+export async function scanThemeLibrary(themeLibrary) {
+  const stat = await fs.lstat(themeLibrary);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Theme library must be a regular directory");
+  const realRoot = await fs.realpath(themeLibrary);
+  const themeDirectories = new Map();
+  const themeCatalog = [];
+  const rejected = [];
+  const entries = (await fs.readdir(realRoot, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name, "en"));
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.isSymbolicLink() || entry.name.startsWith(".")) continue;
+    try {
+      const directory = await fs.realpath(path.join(realRoot, entry.name));
+      if (path.dirname(directory) !== realRoot) throw new Error("Theme escaped its library");
+      const [metadata, directoryStat] = await Promise.all([
+        fs.lstat(path.join(directory, "theme.json")), fs.lstat(directory),
+      ]);
+      if (!metadata.isFile() || metadata.isSymbolicLink()) throw new Error("Theme metadata must be a regular file");
+      const stamp = `${metadata.size}:${metadata.mtimeMs}:${metadata.ctimeMs}:${directoryStat.mtimeMs}`;
+      let cached = catalogCache.get(directory);
+      if (!cached || cached.stamp !== stamp) {
+        const skin = normalizeLegacySkinIdentity(await loadInstalledSkin(directory, { platform: "windows", clientVersion: "2.0.0" }));
+        cached = { stamp, entry: await catalogEntry(directory, skin) };
+        if (catalogCache.size >= 256) catalogCache.delete(catalogCache.keys().next().value);
+        catalogCache.set(directory, cached);
+      }
+      // Catalog metadata may be cached, but selecting a theme always performs a
+      // fresh complete loader/asset validation before it can reach a renderer.
+      if (themeDirectories.has(cached.entry.id)) throw new Error("Duplicate theme id");
+      if (themeCatalog.length >= 127) throw new Error("Theme catalog limit reached (128 including active theme)");
+      themeCatalog.push(cached.entry);
+      themeDirectories.set(cached.entry.id, directory);
+    } catch (error) { rejected.push({ directory: entry.name, reason: error.message }); }
+  }
+  return { root: realRoot, themeCatalog, themeDirectories, rejected };
+}
+
+export async function loadPayloadForOptions(options) {
+  let { themeDir, themeLibrary = null, settings: settingsPath = null, storage,
+    displayMode = "theme", resolveSelection = false } = options;
+  if (!themeLibrary && !settingsPath) return loadPayload(themeDir, null, {
+    ...dynamicRuntimeForOptions(options), displayMode,
+  });
+  if (storage === undefined && themeLibrary) {
+    const location = await readThemeStoragePreference(themeStoragePreferencePath({ settingsPath, themeLibrary }), themeLibrary);
+    themeLibrary = location.root;
+    const inspected = await inspectThemeStorage(location.configuredRoot);
+    storage = { path: location.configuredRoot, custom: location.custom, available: inspected.available,
+      bytes: inspected.bytes, themeCount: inspected.themeCount };
+  }
+  const scanned = themeLibrary ? await scanThemeLibrary(themeLibrary)
+    : { themeCatalog: [], themeDirectories: new Map(), rejected: [] };
+  if (resolveSelection) {
+    const selected = await readThemeSelection(themeSelectionPath({ settingsPath, themeLibrary, pauseFile: options.pauseFile }));
+    if (selected) {
+      themeDir = scanned.themeDirectories.get(selected.themeId) ?? themeDir;
+      displayMode = selected.mode;
+    }
+  }
+  const installedSkin = normalizeLegacySkinIdentity(await loadInstalledSkin(themeDir, { platform: "windows", clientVersion: "2.0.0" }));
+  themeDir = await fs.realpath(themeDir);
+  if (!scanned.themeDirectories.has(installedSkin.theme.id)) {
+    scanned.themeCatalog.push(await catalogEntry(themeDir, installedSkin));
+    scanned.themeDirectories.set(installedSkin.theme.id, await fs.realpath(themeDir));
+  }
+  let settings = DEFAULT_DYNAMIC_SETTINGS;
+  if (settingsPath) {
+    try {
+      const stat = await fs.lstat(settingsPath);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 64 * 1024) throw new Error("Settings must be a bounded regular file");
+      settings = parseDynamicSettings(await fs.readFile(settingsPath, "utf8"));
+    } catch (error) { if (error.code !== "ENOENT") throw error; }
+  }
+  const loaded = await loadV2Payload(themeDir, { ...dynamicRuntimeForOptions(options), displayMode,
+    installedSkin, settings, settingsAuthority: settingsPath ? "shared-file" : "renderer-local",
+    storage, themeCatalog: scanned.themeCatalog });
+  return { ...loaded, themeDirectories: scanned.themeDirectories, rejectedThemes: scanned.rejected,
+    themeCatalog: scanned.themeCatalog, settings, themeDir, themeLibrary: scanned.root ?? themeLibrary };
 }
 
 function expectsVisibleDynamicRoot(loadedPayload) {
@@ -1476,12 +1592,9 @@ export function nextRequestPollState(previous = {}, outcome) {
   throw new TypeError(`Unsupported renderer request poll outcome: ${outcome}`);
 }
 
-export async function presentUnsupportedThemeAction(session, request) {
-  const actionName = request?.action === "delete-theme" ? "删除主题" : "导入媒体";
+export async function presentThemeLibraryStatus(session, token, state, message) {
   const status = JSON.stringify({
-    token: `unsupported:${request?.sequence ?? 0}:${request?.issuedAt ?? 0}`,
-    state: "error",
-    message: `${actionName}尚未在 Windows 版实现，未执行任何更改。`,
+    token, state, message,
     updatedAt: Date.now(),
   });
   return session.evaluate(`(() => {
@@ -1813,7 +1926,7 @@ async function runOneShot(options) {
   let loadedPayload = null;
   try {
     loadedPayload = (options.mode === "once" || options.mode === "verify" || options.reload)
-      ? await loadPayload(options.themeDir, null, dynamicRuntimeForOptions(options)) : null;
+      ? await loadPayloadForOptions({ ...options, resolveSelection: true }) : null;
   } catch (error) {
     if (operationToken) {
       await Promise.all(connected.map(({ session }) => presentOperationUi(
@@ -1930,15 +2043,21 @@ async function runOwnedWatch(options) {
   const targetFailures = new Map();
   const lastThemeRequestSequences = new Map();
   const lastThemeActionRequestSequences = new Map();
-  const selectionFile = options.pauseFile
-    ? themeSelectionPath({ pauseFile: options.pauseFile }) : null;
+  const selectionFile = themeSelectionPath({ pauseFile: options.pauseFile,
+    settingsPath: options.settings, themeLibrary: options.themeLibrary });
   let stopping = false;
   let listFailures = 0;
   let lastListErrorLogAt = 0;
   let lastThemeErrorLogAt = 0;
   let lastStrongThemeAuditAt = 0;
+  let rejectedExternalSelectionKey = null;
+  let rejectedSourceRevision = null;
+  let nextSourceRetryAt = 0;
   let loadedPayload = null;
   let displayMode = "theme";
+  let selectedThemeDir = options.themeDir;
+  let activeThemeLibrary = options.themeLibrary;
+  let libraryMutation = false;
   let paused = false;
   const stop = () => { stopping = true; };
   const rejectTarget = (target, baseDelayMs, error = null) => {
@@ -1964,6 +2083,7 @@ async function runOwnedWatch(options) {
     fallbackListeners.delete(id);
   };
   const recoverRenderer = async (id, session, reason) => {
+    if (libraryMutation) return false;
     if (stopping || sessions.get(id) !== session || session.closed) return false;
     readyTargets.delete(id);
     lastThemeRequestSequences.delete(id);
@@ -2003,7 +2123,7 @@ async function runOwnedWatch(options) {
     return true;
   };
   const createRecoveryQueue = (id, session) => createRendererRecoveryQueue({
-    isCurrent: () => !stopping && sessions.get(id) === session && !session.closed,
+    isCurrent: () => !stopping && !libraryMutation && sessions.get(id) === session && !session.closed,
     recover: (reason) => recoverRenderer(id, session, reason),
     onFailure: async (error, reason) => {
       console.error(`[dream-skin] renderer recovery failed for ${id} (${reason}): ${error.message}`);
@@ -2027,15 +2147,171 @@ async function runOwnedWatch(options) {
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
 
+  const loadWatchedPayload = async (themeDir, mode = displayMode) => {
+    let storage;
+    if (options.themeLibrary) {
+      const inspected = await inspectThemeStorage(activeThemeLibrary);
+      storage = { path: activeThemeLibrary ?? options.themeLibrary,
+        custom: activeThemeLibrary !== options.themeLibrary, available: inspected.available,
+        bytes: inspected.bytes, themeCount: inspected.themeCount };
+    }
+    return loadPayloadForOptions({ ...options, themeDir, themeLibrary: activeThemeLibrary,
+      storage, displayMode: mode });
+  };
+  const refreshPayload = async (themeDir = selectedThemeDir, reason = "source-watch", mode = displayMode, prepared = null) => {
+    const next = prepared ?? await loadWatchedPayload(themeDir, mode);
+    if (next.revision === loadedPayload.revision) {
+      await next.assetGeneration?.release();
+      loadedPayload.sourceStamp = next.sourceStamp;
+      return;
+    }
+    // Existing early scripts and hosted assets remain valid until every attached
+    // renderer has verified the candidate. A failed switch restores all attempts.
+    const previous = loadedPayload;
+    const attempts = [];
+    for (const queue of recoveryQueues.values()) await queue.idle();
+    libraryMutation = true;
+    try {
+      if (!paused) for (const [id, session] of sessions) {
+        if (session.closed || !readyTargets.has(id)) continue;
+        readyTargets.delete(id);
+        const attempt = { id, session, identifier: null };
+        attempts.push(attempt);
+        attempt.identifier = await registerEarlyPayload(session, next.payload, next.revision);
+        if (!attempt.identifier) throw new Error("Early theme registration failed");
+        await applyToSession(session, next.payload);
+        const verified = await waitForVerifiedSession(session, id, Math.min(options.timeoutMs, 8000),
+          next.theme.id, next.revision, expectsVisibleDynamicRoot(next), true);
+        if (!verified?.pass) throw new Error("Theme refresh verification failed");
+      }
+      if (selectionFile) await writeThemeSelection(selectionFile, next.theme.id, mode, {
+        allowAcceptanceThemePersistence: options.allowAcceptanceThemePersistence,
+      });
+      for (const { id, session, identifier } of attempts) {
+        await removeEarlyPayload(session, earlyScripts.get(id));
+        earlyScripts.set(id, identifier);
+        fallbackTargets.set(id, false);
+        readyTargets.add(id);
+      }
+      loadedPayload = next;
+      selectedThemeDir = next.themeDir ?? themeDir;
+      displayMode = mode;
+    } catch (error) {
+      for (const { id, session, identifier } of attempts) {
+        await removeEarlyPayload(session, identifier);
+        if (!session.closed) {
+          try {
+            await applyToSession(session, previous.payload);
+            const restored = await waitForVerifiedSession(session, id, Math.min(options.timeoutMs, 8000),
+              previous.theme.id, previous.revision, expectsVisibleDynamicRoot(previous), true);
+            if (!restored?.pass) throw new Error("Theme rollback verification failed");
+            readyTargets.add(id);
+          } catch { session.close(); }
+        }
+      }
+      try { await next.assetGeneration?.release(); }
+      catch (cleanupError) { console.warn(`[dream-skin] unused theme asset cleanup deferred: ${cleanupError.message}`); }
+      throw error;
+    } finally { libraryMutation = false; }
+    // The renderer, early script, selection and in-memory state are committed.
+    // Windows may still hold a media file open: cleanup failure must never roll
+    // these states back or revoke the generation that has just become active.
+    try { await previous.assetGeneration?.release(); }
+    catch (error) { console.warn(`[dream-skin] previous theme asset cleanup deferred: ${error.message}`); }
+    // A renderer that was already recovering was not part of the transaction.
+    // Reconnect it with the committed early script rather than retaining an old
+    // script whose asset generation has now been retired.
+    const updatedIds = new Set(attempts.map(({ id }) => id));
+    for (const [id, session] of sessions) {
+      if (paused || session.closed || updatedIds.has(id)) continue;
+      await removeEarlyPayload(session, earlyScripts.get(id));
+      earlyScripts.delete(id);
+      readyTargets.delete(id);
+      session.close();
+    }
+    console.log(`[dream-skin] theme updated (${reason}): ${next.theme.id}`);
+  };
+  const libraryController = createThemeLibraryController({
+    getCurrent: () => loadedPayload,
+    getLibraryRoot: () => activeThemeLibrary,
+    setLibraryRoot: (directory) => { activeThemeLibrary = directory; },
+    refreshPayload, settings: options.settings,
+    storagePreference: options.themeLibrary ? themeStoragePreferencePath({ settingsPath: options.settings,
+      themeLibrary: options.themeLibrary }) : null,
+    stateRoot: options.settings ? path.dirname(options.settings)
+      : options.pauseFile ? path.dirname(options.pauseFile) : null,
+    presentStatus: async (token, state, message) => {
+      await Promise.all([...sessions].filter(([id, session]) => readyTargets.has(id) && !session.closed)
+        .map(([, session]) => presentThemeLibraryStatus(session, token, state, message).catch(() => false)));
+    },
+  });
+
+  const applyExternalSelection = async () => {
+    const selection = await readThemeSelection(selectionFile);
+    if (!selection || (selection.themeId === loadedPayload.theme.id && selection.mode === displayMode)) return;
+    const stat = await fs.lstat(selectionFile);
+    // The file identity/timestamps distinguish an intentional retry of the same
+    // tray choice from the unchanged request left behind after a failed apply.
+    const key = `${selection.themeId}:${selection.mode}:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+    if (key === rejectedExternalSelectionKey) return;
+    try {
+      const candidate = await loadPayloadForOptions({ ...options, resolveSelection: true });
+      await refreshPayload(candidate.themeDir ?? options.themeDir, "external-selection",
+        candidate.displayMode ?? "theme", candidate);
+      rejectedExternalSelectionKey = null;
+    } catch (error) {
+      rejectedExternalSelectionKey = key;
+      throw error;
+    }
+  };
+
+  const auditThemeSource = async (now = Date.now()) => {
+    if (now < nextSourceRetryAt) return;
+    let shouldAudit = !loadedPayload || now - lastStrongThemeAuditAt >= STRONG_THEME_AUDIT_MS;
+    if (!shouldAudit) {
+      try { shouldAudit = await readThemeSourceStamp(loadedPayload) !== loadedPayload.sourceStamp; }
+      catch { shouldAudit = true; }
+    }
+    if (!shouldAudit) return;
+    lastStrongThemeAuditAt = now;
+    try {
+      const candidate = loadedPayload?.sourceApiVersion === 2
+        ? await loadWatchedPayload(selectedThemeDir, displayMode)
+        : await loadPayload(selectedThemeDir, null, { ...dynamicRuntimeForOptions(options), displayMode });
+      if (candidate.revision === loadedPayload.revision) {
+        loadedPayload.sourceStamp = candidate.sourceStamp;
+        rejectedSourceRevision = null;
+        await candidate.assetGeneration?.release();
+      } else if (candidate.revision === rejectedSourceRevision) {
+        // Revalidate changed files periodically, but do not flash the same
+        // already-rejected candidate into every renderer again and again.
+        await candidate.assetGeneration?.release();
+        nextSourceRetryAt = now + STRONG_THEME_AUDIT_MS;
+        return;
+      } else {
+        try { await refreshPayload(selectedThemeDir, "source-watch", displayMode, candidate); }
+        catch (error) { rejectedSourceRevision = candidate.revision; throw error; }
+        rejectedSourceRevision = null;
+      }
+      nextSourceRetryAt = 0;
+    } catch (error) {
+      // A missing/incomplete file may not have a candidate fingerprint yet.
+      // Bound these reads too instead of retrying full validation every poll.
+      nextSourceRetryAt = now + STRONG_THEME_AUDIT_MS;
+      throw error;
+    }
+  };
+
   try {
-    loadedPayload = await loadPayload(options.themeDir, null, dynamicRuntimeForOptions(options));
+    loadedPayload = await loadPayloadForOptions({ ...options, resolveSelection: true });
+    selectedThemeDir = loadedPayload.themeDir ?? options.themeDir;
+    activeThemeLibrary = Object.hasOwn(loadedPayload, "themeLibrary") ? loadedPayload.themeLibrary : options.themeLibrary;
+    displayMode = loadedPayload.displayMode ?? "theme";
     const initialSelection = selectionFile ? await readThemeSelection(selectionFile) : null;
-    if (initialSelection?.themeId === loadedPayload.theme.id && initialSelection.mode === "native") {
+    if (displayMode !== "native" && initialSelection?.themeId === loadedPayload.theme.id && initialSelection.mode === "native") {
       displayMode = "native";
       const themedPayload = loadedPayload;
-      const nativePayload = await loadPayload(options.themeDir, null, {
-        ...dynamicRuntimeForOptions(options), displayMode,
-      });
+      const nativePayload = await loadWatchedPayload(selectedThemeDir, displayMode);
       loadedPayload = nativePayload;
       await themedPayload.assetGeneration?.release();
     }
@@ -2069,7 +2345,6 @@ async function runOwnedWatch(options) {
 
       const nextPaused = await fileExists(options.pauseFile);
       let nextPayload = loadedPayload;
-      let requestedDisplayMode = null;
       if (!nextPaused) {
         try {
           const rendererThemeRequests = [];
@@ -2108,66 +2383,27 @@ async function runOwnedWatch(options) {
             });
             if (validatedActionRequest) {
               lastThemeActionRequestSequences.set(id, validatedActionRequest.sequence);
-              if (["import-media", "delete-theme"].includes(validatedActionRequest.action)) {
-                await presentUnsupportedThemeAction(session, validatedActionRequest).catch(() => false);
-              } else {
-                rendererActionRequests.push(validatedActionRequest);
-              }
+              rendererActionRequests.push(validatedActionRequest);
             }
           }
 
           const requestedAction = selectLatestThemeActionRequest(rendererActionRequests);
           const requestedTheme = selectLatestThemeRequest(rendererThemeRequests);
-          if (requestedAction?.action === "restore-default-theme") {
-            requestedDisplayMode = "native";
-          } else if (requestedTheme?.id === loadedPayload.theme.id && displayMode === "native") {
-            requestedDisplayMode = "theme";
-          } else if (requestedTheme?.id && requestedTheme.id !== loadedPayload.theme.id) {
-            console.error(`[dream-skin] rejected unknown Windows theme request ${requestedTheme.id}`);
-          }
+          if (requestedAction) await libraryController.apply(requestedAction);
+          else if (requestedTheme?.id) await libraryController.select(requestedTheme.id);
+          nextPayload = loadedPayload;
 
-          if (requestedDisplayMode && requestedDisplayMode !== displayMode) {
-            nextPayload = await loadPayload(options.themeDir, null, {
-              ...dynamicRuntimeForOptions(options), displayMode: requestedDisplayMode,
-            });
+          if (!requestedAction && !requestedTheme && selectionFile) {
+            await applyExternalSelection();
+            nextPayload = loadedPayload;
           }
 
           if (nextPayload === loadedPayload) {
-            const now = Date.now();
-            let shouldAudit = !loadedPayload
-              || now - lastStrongThemeAuditAt >= STRONG_THEME_AUDIT_MS;
-            if (!shouldAudit) {
-              try {
-                shouldAudit = await readThemeSourceStamp(loadedPayload) !== loadedPayload.sourceStamp;
-              } catch {
-                shouldAudit = true;
-              }
-            }
-            if (shouldAudit) {
-              lastStrongThemeAuditAt = now;
-              if (loadedPayload?.sourceApiVersion === 2) {
-                const candidatePayload = await loadPayload(options.themeDir, null, {
-                  ...dynamicRuntimeForOptions(options), displayMode,
-                });
-                if (candidatePayload.revision !== loadedPayload.revision) {
-                  nextPayload = candidatePayload;
-                } else {
-                  loadedPayload.sourceStamp = candidatePayload.sourceStamp;
-                  await candidatePayload.assetGeneration?.release();
-                }
-              } else {
-                const candidateTheme = await loadTheme(options.themeDir);
-                if (!loadedPayload || candidateTheme.fingerprint !== loadedPayload.fingerprint) {
-                  nextPayload = await loadPayload(options.themeDir, candidateTheme, {
-                    ...dynamicRuntimeForOptions(options), displayMode,
-                  });
-                } else {
-                  loadedPayload.sourceStamp = candidateTheme.sourceStamp;
-                }
-              }
-            }
+            await auditThemeSource();
+            nextPayload = loadedPayload;
           }
         } catch (error) {
+          nextPayload = loadedPayload;
           if (Date.now() - lastThemeErrorLogAt >= 30000) {
             console.error(`[dream-skin] theme update rejected: ${error.message}; keeping the active theme`);
             lastThemeErrorLogAt = Date.now();

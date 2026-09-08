@@ -2,6 +2,7 @@
 param([int]$Port = 9335)
 
 $ErrorActionPreference = 'Stop'
+$portArguments = @(if ($PSBoundParameters.ContainsKey('Port')) { '-Port'; "$Port" })
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName Microsoft.VisualBasic
@@ -24,6 +25,8 @@ $mutex = [System.Threading.Mutex]::new($false, "Local\CodexDreamSkin.$sid.Tray")
 $acquired = $false
 $notify = $null
 $trayIcon = $null
+$autostartProcess = $null
+$autostartTimer = $null
 try {
   try { $acquired = $mutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $acquired = $true }
   if (-not $acquired) { exit 0 }
@@ -144,6 +147,7 @@ try {
     $shortcut = $shell.CreateShortcut($startupShortcut)
     $shortcut.TargetPath = $powershell
     $shortcut.Arguments = "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy RemoteSigned -File `"$PSScriptRoot\tray-dream-skin.ps1`""
+    if ($portArguments.Count -gt 0) { $shortcut.Arguments += ' ' + ($portArguments -join ' ') }
     $shortcut.WorkingDirectory = $SkillRoot
     $shortcut.Description = 'Start Codex Dream Skin in the notification area'
     $shortcut.Save()
@@ -175,7 +179,7 @@ try {
       if ($null -ne $session) {
         $begin = Show-DreamSkinOperationUi -Session $session -Phase begin -Kind apply -TimeoutMs 3000
       }
-      Start-DreamSkinPowerShell -Script $startScript -Arguments @('-Port', "$Port", '-PromptRestart')
+      Start-DreamSkinPowerShell -Script $startScript -Arguments @($portArguments + '-PromptRestart')
       # start-dream-skin is async; close the in-window loading so it does not stick for 180s.
       if ($null -ne $session -and $null -ne $begin -and $begin.Ok) {
         $null = Show-DreamSkinOperationUi -Session $session -Phase finish -Token $begin.Token `
@@ -194,7 +198,7 @@ try {
         if ($null -ne $session) {
           $begin = Show-DreamSkinOperationUi -Session $session -Phase begin -Kind apply -TimeoutMs 3000
         }
-        Start-DreamSkinPowerShell -Script $startScript -Arguments @('-Port', "$Port", '-PromptRestart')
+        Start-DreamSkinPowerShell -Script $startScript -Arguments @($portArguments + '-PromptRestart')
         if ($null -ne $session -and $null -ne $begin -and $begin.Ok) {
           $null = Show-DreamSkinOperationUi -Session $session -Phase finish -Token $begin.Token `
           -UiState success -Message (Get-DreamSkinTrayText -Key 'ResumeStarted') -TimeoutMs 1500
@@ -357,12 +361,21 @@ try {
     }.GetNewClosure()
     $null = Add-DreamSkinTrayItem -Items $menu.Items -Text (Get-DreamSkinTrayText -Key 'LaunchAtLogin') `
       -Action $autoStartAction -Checked $autoStartEnabled
+    $idleRestartMarker = Join-Path $StateRoot 'autostart-idle-restart.enabled'
+    $idleRestartEnabled = Test-Path -LiteralPath $idleRestartMarker -PathType Leaf
+    $idleRestartAction = {
+      if ($idleRestartEnabled) {
+        Remove-Item -LiteralPath $idleRestartMarker -Force -ErrorAction SilentlyContinue
+      } else {
+        Write-DreamSkinUtf8FileAtomically -Path $idleRestartMarker -Content 'enabled'
+      }
+    }.GetNewClosure()
+    $null = Add-DreamSkinTrayItem -Items $menu.Items -Text (Get-DreamSkinTrayText -Key 'AutoInjectIdle') `
+      -Action $idleRestartAction -Checked $idleRestartEnabled
     Add-DreamSkinTrayLanguageMenu
     [void]$menu.Items.Add([System.Windows.Forms.ToolStripSeparator]::new())
     $null = Add-DreamSkinTrayItem -Items $menu.Items -Text (Get-DreamSkinTrayText -Key 'Restore') -Action {
-      Start-DreamSkinPowerShell -Script $restoreScript -Arguments @(
-        '-Port', "$Port", '-RestoreBaseTheme', '-PromptRestart'
-      )
+      Start-DreamSkinPowerShell -Script $restoreScript -Arguments @($portArguments + @('-RestoreBaseTheme', '-PromptRestart'))
       $notify.Visible = $false
       [System.Windows.Forms.Application]::Exit()
     }
@@ -375,13 +388,31 @@ try {
   $menu.add_Opening({ Rebuild-DreamSkinTrayMenu })
   $notify.add_DoubleClick({
     try {
-      Start-DreamSkinPowerShell -Script $startScript -Arguments @('-Port', "$Port", '-PromptRestart')
+      Start-DreamSkinPowerShell -Script $startScript -Arguments @($portArguments + '-PromptRestart')
     } catch {
       Show-DreamSkinTrayError -Message $_.Exception.Message
     }
   })
+  function Start-DreamSkinAutostartObserver {
+    if ($null -ne $script:autostartProcess -and -not $script:autostartProcess.HasExited) { return }
+    if ($null -ne $script:autostartProcess) { $script:autostartProcess.Dispose() }
+    $arguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden',
+      '-ExecutionPolicy', 'RemoteSigned', '-File', (Join-Path $PSScriptRoot 'autostart-dream-skin.ps1'),
+      '-ParentProcessId', "$PID", '-ParentStartedAt', (Get-DreamSkinProcessStartedAt -ProcessId $PID)) + $portArguments
+    $script:autostartProcess = Start-Process -FilePath $powershell `
+      -ArgumentList (ConvertTo-DreamSkinArgumentLine -Arguments $arguments) -WindowStyle Hidden -PassThru
+  }
+  # Observation is outside the UI thread. The child exits when this exact tray
+  # process exits, and never launches Codex while the app is closed.
+  try { Start-DreamSkinAutostartObserver } catch { Show-DreamSkinTrayError -Message $_.Exception.Message }
+  $autostartTimer = [System.Windows.Forms.Timer]::new()
+  $autostartTimer.Interval = 30000
+  $autostartTimer.add_Tick({ try { Start-DreamSkinAutostartObserver } catch {} })
+  $autostartTimer.Start()
   [System.Windows.Forms.Application]::Run()
 } finally {
+  if ($null -ne $autostartTimer) { $autostartTimer.Stop(); $autostartTimer.Dispose() }
+  if ($null -ne $autostartProcess) { $autostartProcess.Dispose() }
   if ($null -ne $notify) { $notify.Dispose() }
   if ($null -ne $trayIcon) { $trayIcon.Dispose() }
   if ($acquired) { try { $mutex.ReleaseMutex() } catch {} }

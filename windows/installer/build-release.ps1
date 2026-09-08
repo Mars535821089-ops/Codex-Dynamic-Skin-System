@@ -163,7 +163,7 @@ function Copy-ReleaseManifestFiles {
   )
   foreach ($relative in $RelativePaths) {
     $value = "$relative".Replace('/', '\')
-    if ($value -cnotmatch '^(?:assets|scripts)\\') { continue }
+    if ($value -cnotmatch '^(?:assets|scripts)\\' -and $value -cne 'repository.json') { continue }
     $source = Join-Path $SourceRoot $value
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
       throw "Manifest-approved release input does not exist: $value"

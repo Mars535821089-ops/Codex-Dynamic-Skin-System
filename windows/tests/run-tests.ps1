@@ -21,8 +21,22 @@ foreach ($token in @(
 }
 Push-Location $root
 try {
+  foreach ($directory in @('windows/scripts', 'windows/installer', 'windows/tests')) {
+    foreach ($script in @(Get-ChildItem -LiteralPath (Join-Path $root $directory) -Filter '*.ps1' -File)) {
+      $parseErrors = $null; $tokens = $null
+      [void][System.Management.Automation.Language.Parser]::ParseFile($script.FullName, [ref]$tokens, [ref]$parseErrors)
+      if ($parseErrors.Count -gt 0) { throw "PowerShell syntax errors in $($script.FullName): $parseErrors" }
+    }
+  }
   $tests = @()
   $tests += Get-ChildItem -LiteralPath (Join-Path $root 'windows/tests') -Filter '*.test.mjs' -File
+  # Shared suites do not invoke macOS launchers or external UI applications.
+  foreach ($name in @('asset-host', 'audio-bus', 'content-manifest', 'controls',
+      'dynamic-controller', 'dynamic-settings', 'effect-runtime', 'media-layer',
+      'media-signatures', 'payload-composer', 'renderer-asset-bridge',
+      'theme-contract', 'theme-loader', 'zip-preflight')) {
+    $tests += Get-Item -LiteralPath (Join-Path $root "tools/tests/$name.test.mjs")
+  }
   & node --test @($tests.FullName)
   if ($LASTEXITCODE -ne 0) { throw "Windows JavaScript tests failed with exit code $LASTEXITCODE" }
   $powerShellPath = (Get-Process -Id $PID -ErrorAction Stop).Path

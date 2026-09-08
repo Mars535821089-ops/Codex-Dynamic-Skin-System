@@ -1,18 +1,33 @@
 import { createHash, randomBytes } from "node:crypto";
-import { execFile } from "node:child_process";
 import { createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { promisify } from "node:util";
 
 import { loadInstalledSkin } from "../assets/dynamic/theme-loader.mjs";
+import { inspectMediaFile } from "../assets/dynamic/media-signatures.mjs";
+import { runWindowsPowerShell, validateWindowsDialogSelection } from "./theme-library-actions.mjs";
 
-const execFileAsync = promisify(execFile);
-const CLIENT_OPTIONS = Object.freeze({ platform: "macos", clientVersion: "2.0.0" });
+const CLIENT_OPTIONS = Object.freeze({ platform: "windows", clientVersion: "2.0.0" });
+// Windows ships validated v1 presets alongside imported v2 themes. Migration
+// preserves their original bytes; the shared loader validates both formats.
+const SUPPORTED_SOURCE_APIS = new Set([1, 2]);
+
+async function loadStoredTheme(directory) {
+  const loaded = await loadInstalledSkin(directory, CLIENT_OPTIONS);
+  if (!SUPPORTED_SOURCE_APIS.has(loaded.sourceApiVersion)) {
+    throw new Error(`Theme ${path.basename(directory)} uses an unsupported Skin API version`);
+  }
+  if (loaded.sourceApiVersion === 1) {
+    // The v1 adapter validates paths and metadata, but does not decode its image.
+    // Do not admit a text file renamed .png when enabling legacy migration.
+    await inspectMediaFile(path.join(directory, loaded.theme.visual.asset), { role: "image" });
+  }
+  return loaded;
+}
 
 function isWithin(parent, candidate) {
   const relative = path.relative(parent, candidate);
-  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== "..");
+  return relative === "" || (!path.isAbsolute(relative) && !relative.startsWith(`..${path.sep}`) && relative !== "..");
 }
 
 async function existingDirectory(requested, label) {
@@ -40,6 +55,9 @@ export function themeStoragePreferencePath({ settingsPath = null, themeLibrary }
 export async function readThemeStoragePreference(preferencePath, fallbackRoot) {
   let parsed;
   try {
+    const stat = await fs.lstat(preferencePath);
+    if (stat.isSymbolicLink()) throw new Error("Theme storage preference must not be a symbolic link");
+    if (!stat.isFile() || stat.size > 16 * 1024) throw new Error("Theme storage preference is invalid");
     parsed = JSON.parse(await fs.readFile(preferencePath, "utf8"));
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
@@ -60,6 +78,7 @@ export async function writeThemeStoragePreference(preferencePath, libraryRoot) {
   const root = await existingDirectory(libraryRoot, "Theme library");
   const parent = path.dirname(path.resolve(preferencePath));
   await fs.mkdir(parent, { recursive: true, mode: 0o700 });
+  await existingDirectory(parent, "Theme storage preference directory");
   const temporary = path.join(parent, `.theme-storage-${process.pid}-${randomBytes(5).toString("hex")}`);
   try {
     await fs.writeFile(temporary, `${JSON.stringify({ schemaVersion: 1, libraryRoot: root }, null, 2)}\n`, {
@@ -106,21 +125,20 @@ export async function inspectThemeStorage(libraryRoot) {
   for (const entry of await fs.readdir(root, { withFileTypes: true })) {
     if (!entry.isDirectory() || entry.isSymbolicLink() || entry.name.startsWith(".")) continue;
     try {
-      const loaded = await loadInstalledSkin(path.join(root, entry.name), CLIENT_OPTIONS);
-      if (loaded.sourceApiVersion === 2) themeCount += 1;
+      const loaded = await loadStoredTheme(path.join(root, entry.name));
+      if (SUPPORTED_SOURCE_APIS.has(loaded.sourceApiVersion)) themeCount += 1;
     } catch {}
   }
   return { path: root, available: true, bytes: await walkStorage(root), themeCount };
 }
 
 async function copyAndValidateTheme(source, destinationRoot) {
-  const sourceLoaded = await loadInstalledSkin(source, CLIENT_OPTIONS);
-  if (sourceLoaded.sourceApiVersion !== 2) throw new Error(`Theme ${path.basename(source)} is not Skin API v2`);
+  const sourceLoaded = await loadStoredTheme(source);
   const destination = path.join(destinationRoot, path.basename(source));
   const existing = await fs.lstat(destination).catch((error) => error?.code === "ENOENT" ? null : Promise.reject(error));
   if (existing) {
     if (existing.isSymbolicLink() || !existing.isDirectory()) throw new Error(`Theme migration conflict at ${destination}`);
-    const loaded = await loadInstalledSkin(destination, CLIENT_OPTIONS).catch(() => null);
+    const loaded = await loadStoredTheme(destination).catch(() => null);
     if (!loaded || loaded.theme.id !== sourceLoaded.theme.id || loaded.fingerprint !== sourceLoaded.fingerprint) {
       throw new Error(`Theme migration conflict at ${destination}`);
     }
@@ -130,7 +148,7 @@ async function copyAndValidateTheme(source, destinationRoot) {
   const stage = path.join(destinationRoot, `.migrate-${process.pid}-${randomBytes(6).toString("hex")}`);
   try {
     await fs.cp(source, stage, { recursive: true, errorOnExist: true, force: false });
-    const copied = await loadInstalledSkin(stage, CLIENT_OPTIONS);
+    const copied = await loadStoredTheme(stage);
     if (copied.theme.id !== sourceLoaded.theme.id || copied.fingerprint !== sourceLoaded.fingerprint) {
       throw new Error(`Theme migration validation failed for ${sourceLoaded.theme.id}`);
     }
@@ -196,7 +214,7 @@ export async function finalizeThemeLibraryMigration(result) {
   // destination can change before the UI commits the new preference.
   for (const theme of result?.themes ?? []) {
     const destination = await existingDirectory(theme.destination, "Destination theme");
-    const loaded = await loadInstalledSkin(destination, CLIENT_OPTIONS);
+    const loaded = await loadStoredTheme(destination);
     if (loaded.theme.id !== theme.themeId || loaded.fingerprint !== theme.fingerprint) {
       throw new Error(`Destination theme changed before migration cleanup: ${theme.themeId}`);
     }
@@ -209,7 +227,7 @@ export async function finalizeThemeLibraryMigration(result) {
   for (const theme of result?.themes ?? []) {
     const source = await fs.realpath(theme.source).catch((error) => error?.code === "ENOENT" ? null : Promise.reject(error));
     if (!source) continue;
-    const loaded = await loadInstalledSkin(source, CLIENT_OPTIONS);
+    const loaded = await loadStoredTheme(source);
     if (loaded.theme.id !== theme.themeId || loaded.fingerprint !== theme.fingerprint) {
       throw new Error(`Source theme changed before migration cleanup: ${theme.themeId}`);
     }
@@ -233,7 +251,7 @@ export async function rollbackThemeLibraryMigration(result) {
   for (const theme of (result?.themes ?? []).filter((item) => item.copied)) {
     const destination = await fs.realpath(theme.destination).catch((error) => error?.code === "ENOENT" ? null : Promise.reject(error));
     if (!destination) continue;
-    const loaded = await loadInstalledSkin(destination, CLIENT_OPTIONS);
+    const loaded = await loadStoredTheme(destination);
     if (loaded.theme.id !== theme.themeId || loaded.fingerprint !== theme.fingerprint) {
       throw new Error(`Destination theme changed before migration rollback: ${theme.themeId}`);
     }
@@ -268,7 +286,7 @@ export async function migrateThemeLibrary({ sourceRoot, destinationRoot, removeS
     throw new Error("Source and destination theme libraries must not contain each other");
   }
   await fs.access(destination, fs.constants.W_OK);
-  // Reject directory links before copying or cleaning any source material.
+  // Reject directory junctions before copying or cleaning any source material.
   const deletedSource = await optionalDirectory(path.join(source, ".deleted"));
   const deletedDestinationExisting = await optionalDirectory(path.join(destination, ".deleted"));
   if (deletedSource && path.dirname(deletedSource) !== source) throw new Error("Theme archive escaped its source library");
@@ -305,23 +323,15 @@ export async function migrateThemeLibrary({ sourceRoot, destinationRoot, removeS
   return result;
 }
 
-export async function chooseThemeLibraryDirectory() {
-  const script = [
-    "with timeout of 600 seconds",
-    "tell application \"Finder\"",
-    "activate",
-    "set selectedFolder to choose folder with prompt \"选择 Dream Skin 主题素材库存放位置\"",
-    "end tell",
-    "end timeout",
-    "return POSIX path of selectedFolder",
-  ];
-  try {
-    const { stdout } = await execFileAsync("/usr/bin/osascript", script.flatMap((line) => ["-e", line]), {
-      timeout: 10 * 60_000, maxBuffer: 1024 * 1024,
-    });
-    return stdout.trim() || null;
-  } catch (error) {
-    if (error?.code === 1 || /User canceled/i.test(error?.stderr ?? "")) return null;
-    throw error;
-  }
+export async function chooseThemeLibraryDirectory(options = {}) {
+  const value = await runWindowsPowerShell(`
+Add-Type -AssemblyName System.Windows.Forms
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+try {
+  $dialog.Description = 'Choose the Dream Skin theme library location'
+  $dialog.ShowNewFolderButton = $true
+  if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ConvertTo-Json -InputObject $dialog.SelectedPath -Compress }
+  else { 'null' }
+} finally { $dialog.Dispose() }`, options);
+  return validateWindowsDialogSelection(value);
 }

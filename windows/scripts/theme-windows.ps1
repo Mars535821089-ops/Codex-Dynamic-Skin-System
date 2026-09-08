@@ -158,14 +158,47 @@ function Assert-DreamSkinSafeCssFile {
 function Get-DreamSkinThemePaths {
   param([string]$StateRoot = (Join-Path $env:LOCALAPPDATA 'CodexDreamSkin'))
   $fullRoot = [System.IO.Path]::GetFullPath($StateRoot)
+  $saved = Join-Path $fullRoot 'themes'
+  $savedAvailable = $true
+  $preferencePath = Join-Path $fullRoot 'theme-storage.json'
+  Assert-DreamSkinNoReparseComponents -Path $preferencePath
+  if (Test-Path -LiteralPath $preferencePath) {
+    $preferenceItem = Get-Item -LiteralPath $preferencePath -Force -ErrorAction Stop
+    if ($preferenceItem.PSIsContainer -or $preferenceItem.Length -gt 16384) { throw 'Theme storage preference is invalid.' }
+    $preference = (Read-DreamSkinUtf8File -Path $preferencePath) | ConvertFrom-Json -ErrorAction Stop
+    if ($null -eq $preference -or $preference.schemaVersion -ne 1 -or
+      $preference.libraryRoot -isnot [string] -or $preference.libraryRoot.Length -gt 2048 -or
+      $preference.libraryRoot -match '[\x00-\x1f\x7f]' -or
+      -not [System.IO.Path]::IsPathRooted($preference.libraryRoot)) { throw 'Theme storage preference is invalid.' }
+    $saved = [System.IO.Path]::GetFullPath($preference.libraryRoot)
+    Assert-DreamSkinNoReparseComponents -Path $saved
+    # Never recreate a detached drive path or silently import into a different library.
+    if ((Test-Path -LiteralPath $saved) -and -not (Test-Path -LiteralPath $saved -PathType Container)) {
+      throw 'The configured theme library is not a directory.'
+    }
+    $savedAvailable = Test-Path -LiteralPath $saved -PathType Container
+  }
   return [pscustomobject]@{
     Root = $fullRoot
     Active = Join-Path $fullRoot 'active-theme'
-    Saved = Join-Path $fullRoot 'themes'
+    Saved = $saved
+    SavedAvailable = $savedAvailable
     Images = Join-Path $fullRoot 'images'
     PauseFile = Join-Path $fullRoot 'paused'
     State = Join-Path $fullRoot 'state.json'
   }
+}
+
+function Invoke-DreamSkinThemeRuntimeCommand {
+  param([ValidateSet('inspect', 'select')][string]$Command,
+    [Parameter(Mandatory = $true)][string]$ThemeDirectory, [string]$StateRoot)
+  $node = Get-DreamSkinNodeRuntime
+  $runtimeCommand = Join-Path $PSScriptRoot 'theme-runtime-command.mjs'
+  $commandArgs = @($runtimeCommand, $Command, $ThemeDirectory)
+  if ($StateRoot) { $commandArgs += $StateRoot }
+  $output = @(& $node.Path @commandArgs 2>&1)
+  if ($LASTEXITCODE -ne 0) { throw ('Theme runtime validation failed: ' + ($output -join "`n")) }
+  return (($output -join "`n") | ConvertFrom-Json -ErrorAction Stop)
 }
 
 function Test-DreamSkinThemePathWithin {
@@ -283,10 +316,13 @@ function Initialize-DreamSkinThemeStore {
     [string]$StateRoot = (Join-Path $env:LOCALAPPDATA 'CodexDreamSkin')
   )
   $paths = Get-DreamSkinThemePaths -StateRoot $StateRoot
-  foreach ($directory in @($paths.Root, $paths.Active, $paths.Saved, $paths.Images)) {
+  foreach ($directory in @($paths.Root, $paths.Active, $paths.Images)) {
     Ensure-DreamSkinManagedDirectory -Path $directory -Root $paths.Root
   }
-  Invoke-DreamSkinThemeReplacementRecovery -Paths $paths
+  if ($paths.SavedAvailable) {
+    Ensure-DreamSkinManagedDirectory -Path $paths.Saved -Root $paths.Saved
+    Invoke-DreamSkinThemeReplacementRecovery -Paths $paths
+  }
   $assetRoot = Join-Path $SkillRoot 'assets'
   $bundledTheme = Read-DreamSkinTheme -ThemeDirectory $assetRoot
   $assetImage = $bundledTheme.ImagePath
@@ -312,6 +348,10 @@ function Initialize-DreamSkinThemeStore {
     Assert-DreamSkinNoReparseComponents -Path $activeTheme
     Copy-Item -LiteralPath (Join-Path $assetRoot 'theme.json') -Destination $activeTheme -Force
   }
+  if (-not $paths.SavedAvailable) {
+    $null = Read-DreamSkinTheme -ThemeDirectory $paths.Active
+    return $paths
+  }
   $retiredPresetDirectory = Join-Path $paths.Saved 'preset-romantic-rose'
   Assert-DreamSkinNoReparseComponents -Path $retiredPresetDirectory
   if (Test-Path -LiteralPath $retiredPresetDirectory) {
@@ -323,7 +363,7 @@ function Initialize-DreamSkinThemeStore {
   Assert-DreamSkinNoReparseComponents -Path $presetTheme
   # Refresh the saved copy on every run (matching macOS seeding) so preset
   # metadata upgrades — e.g. the #183 appearance pin — reach existing installs.
-  Ensure-DreamSkinManagedDirectory -Path $presetDirectory -Root $paths.Root
+  Ensure-DreamSkinManagedDirectory -Path $presetDirectory -Root $paths.Saved
   $presetImage = Join-Path $presetDirectory $assetImageName
   Assert-DreamSkinNoReparseComponents -Path $presetImage
   Copy-Item -LiteralPath $assetImage -Destination $presetImage -Force
@@ -341,7 +381,7 @@ function Initialize-DreamSkinThemeStore {
   Assert-DreamSkinNoReparseComponents -Path $gothicTheme
   if ((Test-Path -LiteralPath $gothicSourceTheme -PathType Leaf) -and
     (Test-Path -LiteralPath $gothicSourceImage -PathType Leaf)) {
-    Ensure-DreamSkinManagedDirectory -Path $gothicDirectory -Root $paths.Root
+    Ensure-DreamSkinManagedDirectory -Path $gothicDirectory -Root $paths.Saved
     $gothicImage = Join-Path $gothicDirectory 'background.jpg'
     Assert-DreamSkinNoReparseComponents -Path $gothicImage
     Assert-DreamSkinImageFile -Path $gothicSourceImage
@@ -462,6 +502,7 @@ function Set-DreamSkinActiveTheme {
   Copy-Item -LiteralPath $target -Destination $imageArchive -Force
   Assert-DreamSkinNoReparseComponents -Path $imageArchive
   Assert-DreamSkinImageFile -Path $imageArchive
+  $null = Invoke-DreamSkinThemeRuntimeCommand -Command select -ThemeDirectory $paths.Active -StateRoot $paths.Root
   return Read-DreamSkinTheme -ThemeDirectory $paths.Active
 }
 
@@ -497,12 +538,13 @@ function Save-DreamSkinCurrentTheme {
     throw 'Theme name must be between 1 and 80 visible characters.'
   }
   $paths = Get-DreamSkinThemePaths -StateRoot $StateRoot
+  if (-not $paths.SavedAvailable) { throw 'The configured theme library is unavailable.' }
   Ensure-DreamSkinManagedDirectory -Path $paths.Root -Root $paths.Root
-  Ensure-DreamSkinManagedDirectory -Path $paths.Saved -Root $paths.Root
+  Ensure-DreamSkinManagedDirectory -Path $paths.Saved -Root $paths.Saved
   $active = Read-DreamSkinTheme -ThemeDirectory $paths.Active
   $id = (Get-Date).ToString('yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
   $destination = Join-Path $paths.Saved $id
-  Ensure-DreamSkinManagedDirectory -Path $destination -Root $paths.Root
+  Ensure-DreamSkinManagedDirectory -Path $destination -Root $paths.Saved
   $extension = [System.IO.Path]::GetExtension($active.ImagePath).ToLowerInvariant()
   $imageName = 'art' + $extension
   $destinationImage = Join-Path $destination $imageName
@@ -1460,7 +1502,7 @@ function Repair-DreamSkinThemeReplacementTransactions {
         throw 'Theme replacement recovery is ambiguous: committed transaction retained a staged replacement.'
       }
       if ($null -ne $backupFingerprint) {
-        Remove-DreamSkinManagedDirectoryVerified -Path $transaction.Backup -Root $Paths.Root
+        Remove-DreamSkinManagedDirectoryVerified -Path $transaction.Backup -Root $Paths.Saved
       }
       Remove-DreamSkinThemeReplacementJournalVerified -Path $transaction.Path
       Remove-DreamSkinThemeReplacementCommitArtifactsVerified -Transaction $transaction
@@ -1502,7 +1544,7 @@ function Repair-DreamSkinThemeReplacementTransactions {
       if ($stageFingerprint -cne $transaction.NewFingerprint) {
         throw 'Theme replacement recovery is ambiguous: the staged replacement fingerprint changed.'
       }
-      Remove-DreamSkinManagedDirectoryVerified -Path $transaction.Stage -Root $Paths.Root
+      Remove-DreamSkinManagedDirectoryVerified -Path $transaction.Stage -Root $Paths.Saved
       Remove-DreamSkinThemeReplacementCommitArtifactsVerified -Transaction $transaction
       Remove-DreamSkinThemeReplacementJournalVerified -Path $transaction.Path
       continue
@@ -1513,7 +1555,7 @@ function Repair-DreamSkinThemeReplacementTransactions {
         throw 'Theme replacement recovery is ambiguous: canonical content does not match the journal.'
       }
       if (Test-Path -LiteralPath $transaction.Stage -ErrorAction Stop) {
-        Remove-DreamSkinManagedDirectoryVerified -Path $transaction.Destination -Root $Paths.Root
+        Remove-DreamSkinManagedDirectoryVerified -Path $transaction.Destination -Root $Paths.Saved
       } else {
         [System.IO.Directory]::Move($transaction.Destination, $transaction.Stage)
       }
@@ -1526,7 +1568,7 @@ function Repair-DreamSkinThemeReplacementTransactions {
         $stageFingerprint -cne $transaction.NewFingerprint) {
         throw 'Theme replacement recovery is ambiguous: the staged replacement fingerprint changed.'
       }
-      Remove-DreamSkinManagedDirectoryVerified -Path $transaction.Stage -Root $Paths.Root
+      Remove-DreamSkinManagedDirectoryVerified -Path $transaction.Stage -Root $Paths.Saved
       Remove-DreamSkinThemeReplacementCommitArtifactsVerified -Transaction $transaction
       Remove-DreamSkinThemeReplacementJournalVerified -Path $transaction.Path
       continue
@@ -1539,7 +1581,7 @@ function Repair-DreamSkinThemeReplacementTransactions {
         if ($stageFingerprint -cne $transaction.NewFingerprint) {
           throw 'Theme replacement recovery is ambiguous: the staged replacement fingerprint changed.'
         }
-        Remove-DreamSkinManagedDirectoryVerified -Path $transaction.Stage -Root $Paths.Root
+        Remove-DreamSkinManagedDirectoryVerified -Path $transaction.Stage -Root $Paths.Saved
       }
       Remove-DreamSkinThemeReplacementCommitArtifactsVerified -Transaction $transaction
       Remove-DreamSkinThemeReplacementJournalVerified -Path $transaction.Path
@@ -1590,9 +1632,9 @@ function Import-DreamSkinThemeZip {
     [AllowNull()][string]$ExpectedArchiveSha256
   )
   $paths = Get-DreamSkinThemePaths -StateRoot $StateRoot
-  foreach ($directory in @($paths.Root, $paths.Saved)) {
-    Ensure-DreamSkinManagedDirectory -Path $directory -Root $paths.Root
-  }
+  if (-not $paths.SavedAvailable) { throw 'The configured theme library is unavailable.' }
+  Ensure-DreamSkinManagedDirectory -Path $paths.Root -Root $paths.Root
+  Ensure-DreamSkinManagedDirectory -Path $paths.Saved -Root $paths.Saved
   $mutex = New-DreamSkinThemeImportMutex
   $acquired = $false
   $workRoot = Join-Path $paths.Root ('.theme-import-work-' + [guid]::NewGuid().ToString('N'))
@@ -1808,7 +1850,7 @@ function Import-DreamSkinThemeZip {
     }
 
     $publishStage = Join-Path $paths.Saved ('.theme-import-' + [guid]::NewGuid().ToString('N'))
-    Ensure-DreamSkinManagedDirectory -Path $publishStage -Root $paths.Root
+    Ensure-DreamSkinManagedDirectory -Path $publishStage -Root $paths.Saved
     $imageName = [System.IO.Path]::GetFileName($source.ImagePath)
     $stagedImage = Join-Path $publishStage $imageName
     Assert-DreamSkinNoReparseComponents -Path $stagedImage
@@ -1893,7 +1935,7 @@ function Import-DreamSkinThemeZip {
             Assert-DreamSkinNoReparseComponents -Path $destination
             $quarantine = Join-Path $paths.Saved ('.theme-failed-' + [guid]::NewGuid().ToString('N'))
             [System.IO.Directory]::Move($destination, $quarantine)
-            Remove-DreamSkinManagedDirectoryVerified -Path $quarantine -Root $paths.Root
+            Remove-DreamSkinManagedDirectoryVerified -Path $quarantine -Root $paths.Saved
           }
           if (Test-Path -LiteralPath $destination -ErrorAction Stop) {
             throw 'published destination remains'
@@ -1952,7 +1994,7 @@ function Import-DreamSkinThemeZip {
         # The commit marker remains until the verified old backup is gone. If
         # cleanup stops here, the next locked recovery retains the new theme.
         if ($backup) {
-          Remove-DreamSkinManagedDirectoryVerified -Path $backup -Root $paths.Root
+          Remove-DreamSkinManagedDirectoryVerified -Path $backup -Root $paths.Saved
         }
         Remove-DreamSkinThemeReplacementJournalVerified -Path $replacementJournalPath
         Remove-DreamSkinThemeReplacementCommitArtifactsVerified `
@@ -1972,7 +2014,7 @@ function Import-DreamSkinThemeZip {
         Assert-DreamSkinNoReparseComponents -Path $legacy.Directory
         if (-not (Test-Path -LiteralPath $legacy.Directory -PathType Container)) { continue }
         [System.IO.Directory]::Move($legacy.Directory, $cleanupBackup)
-        Remove-DreamSkinManagedDirectoryVerified -Path $cleanupBackup -Root $paths.Root
+        Remove-DreamSkinManagedDirectoryVerified -Path $cleanupBackup -Root $paths.Saved
       } catch {
         $null = $cleanupErrors.Add($_.Exception.Message)
       }
@@ -2023,8 +2065,9 @@ function Get-DreamSkinSavedThemes {
     [switch]$SkipImageMetadata
   )
   $paths = Get-DreamSkinThemePaths -StateRoot $StateRoot
+  if (-not $paths.SavedAvailable) { return @() }
   Ensure-DreamSkinManagedDirectory -Path $paths.Root -Root $paths.Root
-  Ensure-DreamSkinManagedDirectory -Path $paths.Saved -Root $paths.Root
+  Ensure-DreamSkinManagedDirectory -Path $paths.Saved -Root $paths.Saved
   if (-not (Test-Path -LiteralPath $paths.Saved -PathType Container)) { return @() }
   $mutex = New-DreamSkinThemeImportMutex
   $acquired = $false
@@ -2036,7 +2079,7 @@ function Get-DreamSkinSavedThemes {
     foreach ($directory in Get-ChildItem -LiteralPath $paths.Saved -Directory -ErrorAction SilentlyContinue) {
       if ($directory.Name.StartsWith('.')) { continue }
       try {
-        $loaded = Read-DreamSkinTheme -ThemeDirectory $directory.FullName -SkipImageMetadata:$SkipImageMetadata
+        $loaded = Invoke-DreamSkinThemeRuntimeCommand -Command inspect -ThemeDirectory $directory.FullName
         $themes += [pscustomobject]@{
           Id = "$($loaded.Theme.id)"
           Name = if ($loaded.Theme.name) { "$($loaded.Theme.name)" } else { $directory.Name }
@@ -2057,11 +2100,16 @@ function Use-DreamSkinSavedTheme {
     [string]$StateRoot = (Join-Path $env:LOCALAPPDATA 'CodexDreamSkin')
   )
   $paths = Get-DreamSkinThemePaths -StateRoot $StateRoot
+  if (-not $paths.SavedAvailable) { throw 'The configured theme library is unavailable.' }
   Ensure-DreamSkinManagedDirectory -Path $paths.Root -Root $paths.Root
-  Ensure-DreamSkinManagedDirectory -Path $paths.Saved -Root $paths.Root
+  Ensure-DreamSkinManagedDirectory -Path $paths.Saved -Root $paths.Saved
   $directory = [System.IO.Path]::GetFullPath($ThemeDirectory)
   if (-not (Test-DreamSkinThemePathWithin -Path $directory -Root $paths.Saved)) {
     throw 'Saved theme must remain inside the Dream Skin themes folder.'
+  }
+  $runtimeTheme = Invoke-DreamSkinThemeRuntimeCommand -Command inspect -ThemeDirectory $directory
+  if ($runtimeTheme.SourceApiVersion -eq 2) {
+    return Invoke-DreamSkinThemeRuntimeCommand -Command select -ThemeDirectory $directory -StateRoot $paths.Root
   }
   $saved = Read-DreamSkinTheme -ThemeDirectory $directory
   $theme = $saved.Theme | ConvertTo-Json -Depth 8 | ConvertFrom-Json

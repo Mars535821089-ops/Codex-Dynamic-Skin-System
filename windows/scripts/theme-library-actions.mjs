@@ -5,6 +5,7 @@ import { constants as fsConstants } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 
 import { inspectMediaFile } from "../assets/dynamic/media-signatures.mjs";
 import { loadInstalledSkin } from "../assets/dynamic/theme-loader.mjs";
@@ -12,6 +13,32 @@ import { buildContentManifest, writeContentManifest } from "../assets/dynamic/co
 
 const execFileAsync = promisify(execFile);
 const NOFOLLOW = fsConstants.O_NOFOLLOW ?? 0;
+
+export async function runWindowsPowerShell(script, { execute = execFileAsync, timeout = 10 * 60_000 } = {}) {
+  if (execute === execFileAsync && process.platform !== "win32") {
+    throw new Error("Windows native actions require Windows");
+  }
+  const systemRoot = process.env.SystemRoot || "C:\\Windows";
+  if (!path.win32.isAbsolute(systemRoot)) throw new Error("Windows system directory is invalid");
+  const executable = path.win32.join(systemRoot, process.arch === "ia32" && process.env.PROCESSOR_ARCHITEW6432
+    ? "Sysnative" : "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const command = "$ErrorActionPreference='Stop'; [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false);\n" + script;
+  const { stdout } = await execute(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-STA",
+    "-EncodedCommand", Buffer.from(command, "utf16le").toString("base64")], {
+    timeout, maxBuffer: 4 * 1024 * 1024, windowsHide: true,
+  });
+  let result;
+  try { result = JSON.parse(stdout.trim()); } catch { throw new Error("Windows native action returned invalid JSON"); }
+  return result;
+}
+
+export function validateWindowsDialogSelection(value) {
+  if (value === null) return null;
+  if (typeof value !== "string" || !path.win32.isAbsolute(value) || /[\0-\x1f\x7f]/.test(value)) {
+    throw new Error("Windows native picker returned an invalid path");
+  }
+  return value;
+}
 
 async function trustedLibraryRoot(libraryRoot) {
   const requested = path.resolve(libraryRoot);
@@ -44,10 +71,14 @@ function cleanThemeName(value, sourcePath) {
 }
 
 async function readStableSource(sourcePath) {
-  const handle = await fs.open(path.resolve(sourcePath), fsConstants.O_RDONLY | NOFOLLOW);
+  const requested = path.resolve(sourcePath);
+  const sourceStat = await fs.lstat(requested);
+  if (sourceStat.isSymbolicLink() || !sourceStat.isFile()) throw new Error("Imported media must be a regular file, not a symbolic link");
+  const handle = await fs.open(requested, fsConstants.O_RDONLY | NOFOLLOW);
   try {
     const before = await handle.stat();
-    if (!before.isFile()) throw new Error("Imported media must be a regular file");
+    if (!before.isFile() || before.dev !== sourceStat.dev || before.ino !== sourceStat.ino
+      || before.size !== sourceStat.size || before.size > 96 * 1024 * 1024) throw new Error("Imported media changed or exceeds the 96 MiB limit");
     const bytes = await handle.readFile();
     const after = await handle.stat();
     if (bytes.length !== before.size || before.dev !== after.dev || before.ino !== after.ino
@@ -85,12 +116,16 @@ function normalizedVideoDimensions(info) {
 }
 
 async function findFfmpeg() {
-  const candidates = ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"];
+  const candidates = (process.env.PATH || "").split(path.delimiter)
+    .map((directory) => directory.replace(/^"|"$/g, ""))
+    .filter((directory) => directory && path.isAbsolute(directory))
+    .map((directory) => path.join(directory, "ffmpeg.exe"));
   for (const candidate of candidates) {
-    if (await fs.access(candidate, fsConstants.X_OK).then(() => true).catch(() => false)) return candidate;
+    const stat = await fs.lstat(candidate).catch(() => null);
+    if (stat?.isFile() && !stat.isSymbolicLink()) return candidate;
   }
   throw new Error(
-    "This video exceeds 1280x720 or 24fps. Install ffmpeg, then import it again.",
+    "Video import requires ffmpeg.exe on PATH for a validated poster and optional 720p/24fps optimization. Install FFmpeg, then import it again.",
   );
 }
 
@@ -108,7 +143,7 @@ export async function optimizeImportedVideo(sourcePath, outputPath, info) {
   if (info?.hasAudio) args.push("-c:a", "aac", "-b:a", "160k");
   else args.push("-an");
   args.push(outputPath);
-  await execFileAsync(ffmpeg, args, { timeout: 15 * 60_000, maxBuffer: 4 * 1024 * 1024 });
+  await execFileAsync(ffmpeg, args, { timeout: 15 * 60_000, maxBuffer: 4 * 1024 * 1024, windowsHide: true });
 }
 
 function themeDefinition({ id, name, info, visualAsset }) {
@@ -133,49 +168,102 @@ function themeDefinition({ id, name, info, visualAsset }) {
   };
 }
 
-export async function createQuickLookPoster(videoPath, posterPath) {
+export async function createVideoPoster(videoPath, posterPath) {
+  const ffmpeg = await findFfmpeg();
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), "dream-skin-poster-"));
   try {
-    await execFileAsync("/usr/bin/qlmanage", ["-t", "-s", "1920", "-o", temp, videoPath], {
-      timeout: 30_000,
-      maxBuffer: 1024 * 1024,
+    const generated = path.join(temp, "poster.png");
+    await execFileAsync(ffmpeg, ["-nostdin", "-hide_banner", "-loglevel", "error", "-i", videoPath,
+      "-frames:v", "1", "-vf", "scale=1280:720:force_original_aspect_ratio=decrease", generated], {
+      timeout: 60_000, maxBuffer: 1024 * 1024, windowsHide: true,
     });
-    const png = (await fs.readdir(temp)).find((name) => name.toLowerCase().endsWith(".png"));
-    if (!png) throw new Error("macOS could not generate a poster for this video");
-    await fs.copyFile(path.join(temp, png), posterPath, fsConstants.COPYFILE_EXCL);
+    await inspectMediaFile(generated, { role: "poster" });
+    await fs.copyFile(generated, posterPath, fsConstants.COPYFILE_EXCL);
   } finally {
     await fs.rm(temp, { recursive: true, force: true });
   }
 }
 
-export async function chooseMediaFile() {
-  const script = [
-    "with timeout of 600 seconds",
-    "tell application \"Finder\"",
-    "activate",
-    "set selectedFile to choose file with prompt \"选择要生成主题的图片或视频\"",
-    "end tell",
-    "end timeout",
-    "return POSIX path of selectedFile",
-  ];
-  try {
-    const { stdout } = await execFileAsync("/usr/bin/osascript", script.flatMap((line) => ["-e", line]), {
-      timeout: 10 * 60_000,
-      maxBuffer: 1024 * 1024,
-    });
-    const selected = stdout.trim();
-    return selected || null;
-  } catch (error) {
-    if (error?.code === 1 || /User canceled/i.test(error?.stderr ?? "")) return null;
-    throw error;
+export async function chooseMediaFile(options = {}) {
+  const value = await runWindowsPowerShell(`
+Add-Type -AssemblyName System.Windows.Forms
+$dialog = New-Object System.Windows.Forms.OpenFileDialog
+try {
+  $dialog.Title = 'Choose an image, video, GIF, or theme ZIP'
+  $dialog.Filter = 'Supported themes|*.png;*.jpg;*.jpeg;*.webp;*.gif;*.mp4;*.webm;*.zip|Images|*.png;*.jpg;*.jpeg;*.webp;*.gif|Videos|*.mp4;*.webm|Theme packages|*.zip'
+  $dialog.Multiselect = $false
+  $dialog.CheckFileExists = $true
+  if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ConvertTo-Json -InputObject $dialog.FileName -Compress }
+  else { 'null' }
+} finally { $dialog.Dispose() }`, options);
+  return validateWindowsDialogSelection(value);
+}
+
+export async function createThemeThumbnailDataUrl(themeDir, theme, options = {}) {
+  const root = await trustedLibraryRoot(themeDir);
+  const asset = theme?.visual?.kind === "video" ? theme.visual.poster : theme?.visual?.asset;
+  if (!asset) return null;
+  if (typeof asset !== "string" || path.isAbsolute(asset) || path.win32.isAbsolute(asset)
+    || asset.split(/[\\/]/).some((part) => part === ".." || part === "")) {
+    throw new Error("Theme thumbnail must be a relative path inside the theme");
   }
+  const candidate = path.join(root, ...asset.split(/[\\/]/));
+  const stat = await fs.lstat(candidate);
+  if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("Theme thumbnail must be a regular file");
+  const source = await fs.realpath(candidate);
+  const relative = path.relative(root, source);
+  if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error("Theme thumbnail must remain inside the theme");
+  }
+  const info = await inspectMediaFile(source, { role: "image" });
+  if (info.container !== "gif" && info.sizeBytes <= 192 * 1024
+    && Number(info.width) <= 320 && Number(info.height) <= 180) {
+    return `data:${info.mime};base64,${(await readStableSource(source)).toString("base64")}`;
+  }
+  if (info.container === "webp") {
+    const temp = await fs.mkdtemp(path.join(os.tmpdir(), "dream-skin-thumbnail-"));
+    try {
+      const output = path.join(temp, "thumbnail.jpg");
+      await execFileAsync(await findFfmpeg(), ["-nostdin", "-hide_banner", "-loglevel", "error", "-i", source,
+        "-frames:v", "1", "-vf", "scale=240:135:force_original_aspect_ratio=decrease", output],
+      { timeout: 30_000, windowsHide: true, maxBuffer: 1024 * 1024 });
+      await inspectMediaFile(output, { role: "image" });
+      const bytes = await readStableSource(output);
+      if (bytes.length > 192 * 1024) throw new Error("Generated thumbnail exceeds the size limit");
+      return `data:image/jpeg;base64,${bytes.toString("base64")}`;
+    } finally { await fs.rm(temp, { recursive: true, force: true }); }
+  }
+  const quote = (value) => `'${String(value).replaceAll("'", "''")}'`;
+  const value = await runWindowsPowerShell(`
+Add-Type -AssemblyName System.Drawing
+$image = $null; $bitmap = $null; $graphics = $null; $stream = $null
+try {
+  $image = [System.Drawing.Image]::FromFile(${quote(source)})
+  $scale = [Math]::Min(1.0, [Math]::Min(240.0 / $image.Width, 135.0 / $image.Height))
+  $width = [Math]::Max(1, [int]($image.Width * $scale))
+  $height = [Math]::Max(1, [int]($image.Height * $scale))
+  $bitmap = [System.Drawing.Bitmap]::new($width, $height)
+  $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+  $graphics.Clear([System.Drawing.Color]::Black)
+  $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+  $graphics.DrawImage($image, 0, 0, $width, $height)
+  $stream = New-Object System.IO.MemoryStream
+  $bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Jpeg)
+  ConvertTo-Json -InputObject ('data:image/jpeg;base64,' + [Convert]::ToBase64String($stream.ToArray())) -Compress
+} finally {
+  if ($stream) { $stream.Dispose() }; if ($graphics) { $graphics.Dispose() }
+  if ($bitmap) { $bitmap.Dispose() }; if ($image) { $image.Dispose() }
+}`, { ...options, timeout: 30_000 });
+  if (typeof value !== "string" || !/^data:image\/jpeg;base64,[A-Za-z0-9+/]+=*$/.test(value)
+    || value.length > 256 * 1024) throw new Error("Native thumbnail generation returned an invalid image");
+  return value;
 }
 
 export async function importMediaTheme({
   libraryRoot,
   sourcePath,
   themeName,
-  createPoster = createQuickLookPoster,
+  createPoster = createVideoPoster,
   inspectMedia = inspectMediaFile,
   optimizeVideo = optimizeImportedVideo,
 }) {
@@ -195,7 +283,7 @@ export async function importMediaTheme({
   const finalDir = path.join(root, directoryName);
   const existing = await fs.lstat(finalDir).catch((error) => error?.code === "ENOENT" ? null : Promise.reject(error));
   if (existing) {
-    const loaded = await loadInstalledSkin(finalDir, { platform: "macos", clientVersion: "2.0.0" });
+    const loaded = await loadInstalledSkin(finalDir, { platform: "windows", clientVersion: "2.0.0" });
     if (loaded.theme.id !== themeId) throw new Error("Imported theme destination already exists with another identity");
     return { themeId, themeDir: finalDir, duplicate: true, media: info };
   }
@@ -232,11 +320,11 @@ export async function importMediaTheme({
     const theme = themeDefinition({ id: themeId, name: cleanThemeName(themeName, sourcePath),
       info: finalInfo, visualAsset });
     await fs.writeFile(path.join(stage, "theme.json"), `${JSON.stringify(theme, null, 2)}\n`, { flag: "wx", mode: 0o600 });
-    const loaded = await loadInstalledSkin(stage, { platform: "macos", clientVersion: "2.0.0" });
+    const loaded = await loadInstalledSkin(stage, { platform: "windows", clientVersion: "2.0.0" });
     if (loaded.sourceApiVersion !== 2 || loaded.theme.id !== themeId) throw new Error("Imported theme validation failed");
     const contentManifest = await buildContentManifest(stage, loaded.declaredFiles);
     await writeContentManifest(path.join(stage, "content-manifest.json"), contentManifest);
-    const verified = await loadInstalledSkin(stage, { platform: "macos", clientVersion: "2.0.0" });
+    const verified = await loadInstalledSkin(stage, { platform: "windows", clientVersion: "2.0.0" });
     if (verified.contentManifest?.versionId !== contentManifest.versionId) {
       throw new Error("Imported theme content manifest validation failed");
     }
@@ -244,7 +332,7 @@ export async function importMediaTheme({
       await fs.rename(stage, finalDir);
     } catch (error) {
       if (!new Set(["EEXIST", "ENOTEMPTY"]).has(error?.code)) throw error;
-      const concurrent = await loadInstalledSkin(finalDir, { platform: "macos", clientVersion: "2.0.0" });
+      const concurrent = await loadInstalledSkin(finalDir, { platform: "windows", clientVersion: "2.0.0" });
       if (concurrent.theme.id !== themeId) {
         throw new Error("Imported theme destination already exists with another identity");
       }
@@ -263,18 +351,49 @@ export async function importMediaThemeAndActivate({
   libraryRoot,
   sourcePath,
   themeName,
-  createPoster = createQuickLookPoster,
+  createPoster = createVideoPoster,
+  stateRoot,
+  importZip = importThemeZip,
   refreshPayload,
 }) {
   if (typeof refreshPayload !== "function") {
     throw new TypeError("Media import activation requires refreshPayload");
   }
-  const imported = await importMediaTheme({ libraryRoot, sourcePath, themeName, createPoster });
+  const imported = path.extname(sourcePath).toLowerCase() === ".zip"
+    ? await importZip({ libraryRoot, sourcePath, stateRoot })
+    : await importMediaTheme({ libraryRoot, sourcePath, themeName, createPoster });
   await refreshPayload(
     imported.themeDir,
     imported.duplicate ? "media-import-existing" : "media-import",
   );
   return imported;
+}
+
+export async function importThemeZip({ libraryRoot, sourcePath, stateRoot, ...options }) {
+  const root = await trustedLibraryRoot(libraryRoot);
+  if (!stateRoot || !path.isAbsolute(stateRoot)) throw new Error("Theme ZIP import requires an absolute stateRoot");
+  const source = path.resolve(sourcePath);
+  const stat = await fs.lstat(source);
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("Theme ZIP must be a regular file, not a symbolic link");
+  const quote = (value) => `'${String(value).replaceAll("'", "''")}'`;
+  const scripts = path.dirname(fileURLToPath(import.meta.url));
+  const result = await runWindowsPowerShell(`
+. ${quote(path.join(scripts, "common-windows.ps1"))}
+. ${quote(path.join(scripts, "theme-windows.ps1"))}
+$result = Import-DreamSkinThemeZip -ArchivePath ${quote(source)} -StateRoot ${quote(path.resolve(stateRoot))}
+ConvertTo-Json -InputObject $result -Depth 8 -Compress`, { ...options, timeout: 10 * 60_000 });
+  if (!result || !["Imported", "Duplicate"].includes(result.Status) || typeof result.Path !== "string") {
+    throw new Error("Theme ZIP importer returned an invalid result");
+  }
+  const destinationStat = await fs.lstat(result.Path);
+  if (destinationStat.isSymbolicLink() || !destinationStat.isDirectory()) {
+    throw new Error("Imported theme must not be a symbolic link or junction");
+  }
+  const themeDir = await fs.realpath(result.Path);
+  if (path.dirname(themeDir) !== root) throw new Error("Imported theme is outside the selected library");
+  const loaded = await loadInstalledSkin(themeDir, { platform: "windows", clientVersion: "2.0.0" });
+  return { themeId: loaded.theme.id, themeDir, duplicate: result.Status === "Duplicate",
+    versionId: loaded.contentManifest?.versionId ?? null, cleanupWarning: result.CleanupWarning ?? null };
 }
 
 export async function archiveThemeDirectory({
@@ -291,7 +410,7 @@ export async function archiveThemeDirectory({
   if (!stat.isDirectory() || path.dirname(realTheme) !== root) {
     throw new Error("Theme directory must be a direct child of the selected library");
   }
-  const loaded = await loadInstalledSkin(realTheme, { platform: "macos", clientVersion: "2.0.0" });
+  const loaded = await loadInstalledSkin(realTheme, { platform: "windows", clientVersion: "2.0.0" });
   if (loaded.theme.id !== expectedThemeId) throw new Error("Theme identity changed before deletion");
   const deletedRoot = await archiveRoot(root, { create: true });
   const archiveDir = path.join(deletedRoot,
@@ -322,7 +441,7 @@ export async function restoreArchivedThemeDirectory({
   const existing = await fs.lstat(destination).catch((error) =>
     error?.code === "ENOENT" ? null : Promise.reject(error));
   if (existing) throw new Error("Theme restore destination already exists");
-  const loaded = await loadInstalledSkin(realArchive, { platform: "macos", clientVersion: "2.0.0" });
+  const loaded = await loadInstalledSkin(realArchive, { platform: "windows", clientVersion: "2.0.0" });
   if (loaded.theme.id !== expectedThemeId) throw new Error("Archived theme identity changed before restore");
   await fs.rename(realArchive, destination);
   return { themeId: loaded.theme.id, themeDir: destination };

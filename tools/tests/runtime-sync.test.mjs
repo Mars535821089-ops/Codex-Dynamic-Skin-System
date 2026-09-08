@@ -143,9 +143,12 @@ test("runtime sync exposes only a complete old or new generation at commit signa
   await Promise.all([
     fs.cp(path.join(projectRoot, "runtime"), path.join(fixtureRoot, "runtime"), { recursive: true }),
     fs.mkdir(path.join(fixtureRoot, "tools"), { recursive: true }),
+    fs.mkdir(path.join(fixtureRoot, "macos", "scripts"), { recursive: true }),
   ]);
   await Promise.all([
     fs.copyFile(syncTool, path.join(fixtureRoot, "tools", "sync-runtime-assets.mjs")),
+    fs.copyFile(path.join(projectRoot, "macos", "scripts", "dream-skin-autostart.mjs"),
+      path.join(fixtureRoot, "macos", "scripts", "dream-skin-autostart.mjs")),
     fs.copyFile(
       path.join(projectRoot, "tools", "selectors.json"),
       path.join(fixtureRoot, "tools", "selectors.json"),

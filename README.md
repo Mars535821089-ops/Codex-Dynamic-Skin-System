@@ -17,7 +17,7 @@ Codex Dynamic Skin System 是一个面向 Codex Desktop 的跨平台动态主题
 
 为了避免 Codex 在后台持续占用 GPU/CPU，视频的“后台播放”默认关闭。只有明确打开该选项后，下次重启 Codex 才会启用完整的后台播放能力；开启后会增加资源占用。
 
-视频主题建议不超过 1280×720 / 24fps。macOS 的媒体导入器会自动把超出该范围的视频转为 H.264 MP4，需要本机已安装 `ffmpeg`（Homebrew：`brew install ffmpeg`）。Windows 主题包请在打包前将视频预处理到该范围，否则高分辨率、60fps 素材可能明显增加 Codex 的视频解码与 GPU 负载。
+视频主题建议不超过 1280×720 / 24fps。Mac 和 Windows 的媒体导入器会把超出范围的视频转为 H.264 MP4，需要已安装 `ffmpeg` 并加入 PATH（macOS 可用 `brew install ffmpeg`）。Windows 视频封面生成也需要它；缺失时会报错并保留原主题。直接导入的主题 ZIP 请预先处理视频，高分辨率、60fps 素材可能明显增加视频解码与 GPU 负载。
 
 ## 验证状态
 
@@ -38,8 +38,9 @@ Codex Dynamic Skin System 是一个面向 Codex Desktop 的跨平台动态主题
 
 1. 安装 Node.js 22 或更高版本。
 2. 在 PowerShell 中运行 `windows/scripts/install-dream-skin.ps1`。
-3. 安装完成后，使用系统托盘中的 **Codex Dream Skin** 菜单导入、切换或暂停主题。
-4. 如需完整撤销并保持 Codex 关闭，运行 `& ".\windows\scripts\restore-dream-skin.ps1" -RestoreBaseTheme -NoRelaunch`。
+3. 使用生成的 **Codex Dream Skin** 快捷方式启动，再通过应用内主题中心或系统托盘菜单管理主题。
+4. 若要用普通 Codex 图标启动后自动注入，在托盘勾选“普通启动自动注入（仅空闲时重启）”与“登录时启动”；不会反复注入或强制中断运行任务。
+5. 如需完整撤销并保持 Codex 关闭，运行 `& ".\windows\scripts\restore-dream-skin.ps1" -RestoreBaseTheme -NoRelaunch`。
 
 详细步骤见 [macOS 安装说明](docs/install-macos.md) 与 [Windows 安装说明](docs/install-windows.md)。
 

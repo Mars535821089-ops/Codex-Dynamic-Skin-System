@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import * as leaseApi from "../scripts/watcher-lease.mjs";
 
 import {
   acquireWatcherLease,
@@ -72,4 +73,23 @@ test("a reused Windows PID cannot preserve a stale watcher lease", async () => {
   } finally {
     await fs.rm(staleRoot, { recursive: true, force: true });
   }
+});
+
+test("Windows process inspection fails closed while a live owner cannot be inspected", async () => {
+  assert.equal(typeof leaseApi.readProcessIdentity, "function");
+  await assert.rejects(leaseApi.readProcessIdentity(4321, { platform: "win32", isAlive: () => true,
+    execute: async () => { throw new Error("CIM timed out"); } }), /live.*identity/i);
+});
+
+test("Windows process inspection explicitly requests UTF-8 for Chinese owner paths", async () => {
+  assert.equal(typeof leaseApi.readProcessIdentity, "function");
+  const identity = { processStartedAt: "2026-09-09T00:00:00Z", executablePath: "C:\\工具\\node.exe",
+    commandLine: '"C:\\工具\\node.exe" "C:\\动态 主题\\injector.mjs" --watch' };
+  const result = await leaseApi.readProcessIdentity(4321, { platform: "win32", isAlive: () => true,
+    execute: async (executable, args) => {
+      assert.match(executable, /System32[\\/]WindowsPowerShell/);
+      assert.match(args.at(-1), /OutputEncoding.*UTF8Encoding/);
+      return { stdout: JSON.stringify(identity) };
+    } });
+  assert.deepEqual(result, identity);
 });

@@ -10,9 +10,12 @@ import { validateNativeSuiteNames } from "./native-suite-runner.mjs";
 const testsDirectory = dirname(fileURLToPath(import.meta.url));
 const runner = join(testsDirectory, "native-suite-runner.mjs");
 const expectedSuites = [
+  "autostart-policy.tests.ps1",
   "config-startup-rollback.tests.ps1",
   "dynamic-v2-import.Tests.ps1",
+  "lifecycle-regressions.tests.ps1",
   "profile-scoped-stop.tests.ps1",
+  "start-autostart-safety.tests.ps1",
   "start-cdp-failure-appearance-recovery.tests.ps1",
   "start-post-launch-appearance-recovery.tests.ps1",
   "start-renderer-readiness.tests.ps1",
@@ -21,9 +24,12 @@ const expectedSuites = [
   "zip-structure.Tests.ps1"
 ];
 const caseVariantSuites = [
+  "AUTOSTART-POLICY.TESTS.PS1",
   "CONFIG-STARTUP-ROLLBACK.TESTS.PS1",
   "DYNAMIC-V2-IMPORT.tests.ps1",
+  "LIFECYCLE-REGRESSIONS.tests.ps1",
   "PROFILE-SCOPED-STOP.Tests.ps1",
+  "START-AUTOSTART-SAFETY.Tests.ps1",
   "START-CDP-FAILURE-APPEARANCE-RECOVERY.Tests.ps1",
   "START-POST-LAUNCH-APPEARANCE-RECOVERY.Tests.ps1",
   "START-RENDERER-READINESS.Tests.ps1",
@@ -67,13 +73,13 @@ if (suite === process.env.NATIVE_SUITE_FAIL) process.exit(23);
   };
 }
 
-function runFixture(fixture) {
+function runFixture(fixture, extraArgs = []) {
   return spawnSync(process.execPath, [
     runner,
     "--shell", process.execPath,
     "--shell-prefix", fixture.fakeShell,
     "--tests-dir", fixture.directory,
-    "--root", fixture.root
+    "--root", fixture.root, ...extraArgs
   ], {
     encoding: "utf8",
     env: {
@@ -88,6 +94,20 @@ function readInvocations(path) {
   if (!existsSync(path)) return [];
   return readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
 }
+
+test('native runner terminates a hung fixture instead of hanging CI indefinitely', () => {
+  const fixture = createFixture();
+  try {
+    writeFileSync(fixture.fakeShell, 'setInterval(() => {}, 1000);\n');
+    const started = Date.now();
+    const result = runFixture(fixture, ['--suite-timeout-ms', '100']);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /ETIMEDOUT|timed out/i);
+    assert.ok(Date.now() - started < 10000, 'every hung process must be bounded');
+  } finally {
+    rmSync(fixture.directory, { recursive: true, force: true });
+  }
+});
 
 test("native runner executes every PowerShell suite case-insensitively with the public Windows root", () => {
   const fixture = createFixture({ suiteNames: caseVariantSuites });
@@ -105,7 +125,7 @@ test("native runner executes every PowerShell suite case-insensitively with the 
       assert.ok(args.includes("-NoProfile"));
       assert.ok(args.includes("-NonInteractive"));
     }
-    assert.match(result.stdout, /PASS: 9 Windows PowerShell native test suites/);
+    assert.match(result.stdout, /PASS: 12 Windows PowerShell native test suites/);
   } finally {
     rmSync(fixture.directory, { recursive: true, force: true });
   }

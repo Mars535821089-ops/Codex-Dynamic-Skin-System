@@ -25,7 +25,10 @@
 - Shortcut policy: installed launch, restore, tray, and tray-child commands use `RemoteSigned` without `Bypass`; Internet-zone markers are removed only from hash-verified managed PowerShell copies.
 - Config safety: Chinese project names, LF/CRLF choice, quoted target keys, table-header comments, and unrelated TOML sections survive install/selective restore; ambiguous target shapes fail unchanged, exact recovery keeps a copy of the replaced current file, and install refuses both registered and state-recorded old Codex processes.
 - Theme safety: empty/over-10 MB images, over-16384px/50MP dimensions, path escapes, symlinks/junctions, malformed JSON, unsafe CSS, and unsupported formats are rejected before payload construction.
-- Tray lifecycle: pause/resume reflects the clicked state, bundled Arina Hashimoto theme is present on first install, and complete restore terminates any separately launched tray before it can reapply the skin.
+- Tray lifecycle: pause/resume reflects the clicked state, the bundled Gothic Void Crusade preset is present on first install, and complete restore terminates only the identity-verified tray and removes its login shortcut before it can reapply the skin.
+- Theme center: import an image, GIF, video and ZIP; switch themes; restore native appearance; change settings and reopen the center. Verify persisted selection and settings, one media layer, and no periodic theme reapplication while healthy.
+- Library: migrate both legacy and v2 themes, cancel a folder picker, disconnect a custom library, and inject copy/activation failures. Never remove the only valid source copy. Deleting a selected theme must activate a valid fallback first and remain recoverable from the library archive.
+- Automatic startup: closed Codex stays closed; active/unknown tasks and withdrawn consent prohibit automatic restart. Simulate WMI failure, package-path changes, corrupt restart history and PID reuse. These must not clear restart history or close a running app. A debug endpoint outage must not trigger a plain-launch correction.
 
 ## Visual checks
 
@@ -49,4 +52,5 @@
 
 - `tests/run-tests.ps1`: strict UTF-8/no-BOM writes, UTF-16 rejection, LF/CRLF preservation, concurrent-write detection, exact backup/recovery, `[desktop]`-scoped restore, ambiguous TOML rejection, non-ASCII paths, Appx/state identity, argument quoting, theme seeding/import/save/switch/pause, canonical community-link and compatible-metadata rejection, fixed-origin download/apply boundaries, byte/dimension limits, junction rejection, payload construction, Browser ID, loopback URL rejection, and renderer isolation for transparent auxiliary windows.
 - `node --check` for the injector and renderer payload.
-- Live Windows signoff remains required for Store process ownership, restart consent, screenshot, and CDP closure.
+- Windows CI runs both PowerShell 5.1 and PowerShell 7, parses all scripts, runs shared renderer regressions and bounded native/mock lifecycle suites. Each native suite has a timeout; missing suites are a failure.
+- Real Codex Store UI, screenshots and build-specific CDP behavior require a Windows device for separate visual acceptance. Automated source/process verification is not presented as that device-level signoff; no local virtual machine is needed for the source review and regression workflow.

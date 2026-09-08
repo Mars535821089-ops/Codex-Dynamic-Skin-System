@@ -129,3 +129,38 @@ test("migration carries archived deleted themes and only removes them after comm
   await finalizeThemeLibraryMigration(result);
   await assert.rejects(() => fs.stat(path.join(source, ".deleted", "old-theme")), { code: "ENOENT" });
 });
+
+test("migration cleanup retains source when destination media is missing", async (t) => {
+  const root = await temporaryRoot(t);
+  const source = path.join(root, "source"); const destination = path.join(root, "destination");
+  await fs.mkdir(source); await fs.mkdir(destination);
+  const fixture = await makeV2Package(source, "video");
+  await fs.rm(path.join(fixture.root, "manifest.json"));
+  const result = await migrateThemeLibrary({ sourceRoot: source, destinationRoot: destination, removeSource: false });
+  await fs.rm(path.join(destination, "video", "media", "loop.mp4"));
+  await assert.rejects(() => finalizeThemeLibraryMigration(result), /destination|media|missing|ENOENT/i);
+  assert.ok(await fs.stat(path.join(source, "video", "media", "loop.mp4")));
+});
+
+test("migration cleanup retains archived source when copied archive changes", async (t) => {
+  const root = await temporaryRoot(t);
+  const source = path.join(root, "source"); const destination = path.join(root, "destination");
+  await fs.mkdir(path.join(source, ".deleted", "old"), { recursive: true }); await fs.mkdir(destination);
+  await fs.writeFile(path.join(source, ".deleted", "old", "media.mp4"), "original");
+  const result = await migrateThemeLibrary({ sourceRoot: source, destinationRoot: destination, removeSource: false });
+  await fs.writeFile(path.join(destination, ".deleted", "old", "media.mp4"), "changed");
+  await assert.rejects(() => finalizeThemeLibraryMigration(result), /destination.*changed/i);
+  assert.equal(await fs.readFile(path.join(source, ".deleted", "old", "media.mp4"), "utf8"), "original");
+});
+
+test("migration refuses linked archive roots in either library", async (t) => {
+  const root = await temporaryRoot(t);
+  const source = path.join(root, "source"); const destination = path.join(root, "destination"); const outside = path.join(root, "outside");
+  await fs.mkdir(source); await fs.mkdir(destination); await fs.mkdir(outside);
+  const linkType = process.platform === "win32" ? "junction" : "dir";
+  await fs.symlink(outside, path.join(source, ".deleted"), linkType);
+  await assert.rejects(() => migrateThemeLibrary({ sourceRoot: source, destinationRoot: destination }), /symbolic/i);
+  await fs.unlink(path.join(source, ".deleted"));
+  await fs.symlink(outside, path.join(destination, ".deleted"), linkType);
+  await assert.rejects(() => migrateThemeLibrary({ sourceRoot: source, destinationRoot: destination }), /symbolic/i);
+});

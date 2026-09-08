@@ -1,7 +1,7 @@
 import { validateDynamicSettings } from "../assets/dynamic/settings.mjs";
 
 const ACTIONS = new Set([
-  "save-settings", "restore-default-theme", "import-media", "delete-theme",
+  "save-settings", "restore-default-theme", "import-media", "delete-theme", "change-storage",
 ]);
 const THEME_ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/;
 const GENERATION_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;

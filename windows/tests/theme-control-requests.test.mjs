@@ -5,7 +5,7 @@ import {
   selectLatestThemeActionRequest,
   validateThemeActionRequest,
 } from "../scripts/theme-action-request.mjs";
-import { presentUnsupportedThemeAction } from "../scripts/injector.mjs";
+import { presentThemeLibraryStatus } from "../scripts/injector.mjs";
 import { selectLatestThemeRequest, validateThemeRequest } from "../scripts/theme-request.mjs";
 
 const context = {
@@ -31,7 +31,7 @@ test("Windows native-mode actions are fresh, sequenced, and generation-bound", (
   assert.equal(validateThemeActionRequest({ ...request, action: "delete-everything" }, context), null);
 });
 
-test("exposed Windows library actions validate so unsupported controls can fail explicitly", () => {
+test("exposed Windows library actions validate with generation binding", () => {
   const base = {
     themeId: context.currentThemeId,
     generation: context.currentRevision,
@@ -78,7 +78,7 @@ test("the newest validated Windows renderer request wins", () => {
   ]).id, "com.mars.two");
 });
 
-test("unsupported Windows library controls receive an immediate renderer error", async () => {
+test("Windows library action results reach the renderer status event", async () => {
   const calls = [];
   const session = {
     evaluate: async (expression, timeoutMs) => {
@@ -86,11 +86,9 @@ test("unsupported Windows library controls receive an immediate renderer error",
       return true;
     },
   };
-  await presentUnsupportedThemeAction(session, {
-    action: "import-media", sequence: 7, issuedAt: 9_500,
-  });
+  await presentThemeLibraryStatus(session, "operation-1", "success", "已添加并应用主题");
   assert.equal(calls.length, 1);
   assert.equal(calls[0].timeoutMs, 1500);
   assert.match(calls[0].expression, /codex-dynamic-skin-library-status/);
-  assert.match(calls[0].expression, /"state":"error"/);
+  assert.match(calls[0].expression, /"state":"success"/);
 });

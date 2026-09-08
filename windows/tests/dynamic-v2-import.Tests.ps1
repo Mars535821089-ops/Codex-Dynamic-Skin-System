@@ -135,6 +135,40 @@ try {
     throw 'Windows v2 import published package-only manifest metadata into the runtime theme.'
   }
   Write-Host 'PASS: Windows import publishes a complete nested Skin API v2 runtime theme.'
+
+  $customLibrary = Join-Path $temporaryRoot 'custom library'
+  [System.IO.Directory]::CreateDirectory($customLibrary) | Out-Null
+  [System.IO.File]::WriteAllText((Join-Path $stateRoot 'theme-storage.json'),
+    (([ordered]@{ schemaVersion = 1; libraryRoot = $customLibrary } | ConvertTo-Json) + "`n"),
+    [System.Text.UTF8Encoding]::new($false))
+  $customImport = Import-DreamSkinThemeZip -ArchivePath $archivePath -StateRoot $stateRoot
+  if ((Split-Path -Parent $customImport.Path) -cne $customLibrary) {
+    throw 'ZIP imports must publish into the persisted custom library, not the default state directory.'
+  }
+  $listed = @(Get-DreamSkinSavedThemes -StateRoot $stateRoot)
+  if ($listed.Count -ne 1 -or $listed[0].Id -cne 'test.windows.dynamic-v2') {
+    throw 'Saved-theme listing must expose validated v2 themes from the custom library.'
+  }
+  Write-Host 'PASS: ZIP import and saved-theme catalog use the persisted custom library.'
+
+  $offlineLibrary = Join-Path $temporaryRoot 'offline-library'
+  [System.IO.File]::WriteAllText((Join-Path $stateRoot 'theme-storage.json'),
+    (([ordered]@{ schemaVersion = 1; libraryRoot = $offlineLibrary } | ConvertTo-Json) + "`n"),
+    [System.Text.UTF8Encoding]::new($false))
+  $offlinePaths = Get-DreamSkinThemePaths -StateRoot $stateRoot
+  if ($offlinePaths.SavedAvailable -ne $false -or $offlinePaths.Saved -cne $offlineLibrary) {
+    throw 'A disconnected library must remain identifiable without preventing theme-center startup.'
+  }
+  if (@(Get-DreamSkinSavedThemes -StateRoot $stateRoot).Count -ne 0) {
+    throw 'An offline library cannot expose a fabricated fallback catalog.'
+  }
+  $offlineImportRejected = $false
+  try { $null = Import-DreamSkinThemeZip -ArchivePath $archivePath -StateRoot $stateRoot }
+  catch { $offlineImportRejected = $_.Exception.Message.Contains('unavailable') }
+  if (-not $offlineImportRejected -or (Test-Path -LiteralPath $offlineLibrary)) {
+    throw 'Import must reject, and never recreate, a disconnected custom library.'
+  }
+  Write-Host 'PASS: Disconnected custom libraries do not block startup or silently redirect imports.'
 } finally {
   Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

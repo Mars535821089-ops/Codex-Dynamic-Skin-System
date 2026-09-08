@@ -138,6 +138,33 @@ function compileWindowsImageMetadata(source) {
   return `${imports}${source.trimEnd()}\n${WINDOWS_IMAGE_METADATA_CLI}`;
 }
 
+function compileWindowsSessionActivity(source) {
+  // Keep the proven Mac idle evidence algorithm as the single source of truth.
+  // Only stage its platform-neutral probe, never the Mac launcher/process code.
+  const begin = source.indexOf('export function decidePlainLaunchCorrection(');
+  const end = source.indexOf('export function decideAutostartAction(');
+  if (begin < 0 || end <= begin) throw new Error('Mac session activity export boundaries changed');
+  const constants = ['MAX_SESSION_TAIL_BYTES', 'SESSION_CLOCK_TOLERANCE_MS', 'ACTIVE_EVENT', 'TERMINAL_EVENTS']
+    .map((name) => {
+      const declaration = source.match(new RegExp(`^const ${name} = .+;$`, 'm'))?.[0];
+      if (!declaration) throw new Error(`Missing activity policy constant ${name}`);
+      return declaration;
+    }).join('\n');
+  return `// Generated from macos/scripts/dream-skin-autostart.mjs by tools/sync-runtime-assets.mjs.\n`
+    + `import fs from 'node:fs/promises';\nimport path from 'node:path';\nimport { fileURLToPath } from 'node:url';\n`
+    + constants + '\n\n' + source.slice(begin, end)
+    + `if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const args = process.argv.slice(2);
+  if (args.length !== 4 || args[0] !== '--sessions-root' || args[2] !== '--app-started-at-ms'
+      || !Number.isFinite(Number(args[3]))) {
+    console.error('Usage: session-activity.mjs --sessions-root <absolute-path> --app-started-at-ms <epoch-ms>');
+    process.exitCode = 2;
+  } else {
+    console.log(JSON.stringify(await probeSessionActivity(args[1], Number(args[3]))));
+  }
+}\n`;
+}
+
 const sourceCss = await fs.readFile(path.join(projectRoot, "runtime", "dream-skin.css"), "utf8");
 const sourceRuntime = await fs.readFile(path.join(projectRoot, "runtime", "renderer-inject.js"), "utf8");
 const sourceThemePackageValidator = await fs.readFile(
@@ -160,6 +187,7 @@ const sourceImageMetadata = await fs.readFile(
   path.join(projectRoot, "runtime", "image-metadata.mjs"),
   "utf8",
 );
+const sourceAutostart = await fs.readFile(path.join(projectRoot, 'macos/scripts/dream-skin-autostart.mjs'), 'utf8');
 const dynamicBrowserRoot = path.join(projectRoot, "runtime", "dynamic", "browser");
 const browserFiles = (await fs.readdir(dynamicBrowserRoot, { withFileTypes: true }))
   .filter((entry) => entry.isFile())
@@ -192,6 +220,10 @@ const dynamicRuntimeManifest = `${JSON.stringify({
   })),
 }, null, 2)}\n`;
 const outputs = [
+  {
+    content: compileWindowsSessionActivity(sourceAutostart),
+    paths: ['windows/scripts/session-activity.mjs'],
+  },
   {
     // The injector runs from a packaged platform tree, so stage the same
     // contract beside the renderer assets while keeping tools/selectors.json
