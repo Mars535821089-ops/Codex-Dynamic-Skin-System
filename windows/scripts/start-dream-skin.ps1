@@ -205,14 +205,16 @@ try {
     (Test-DreamSkinPathEqual -Left $savedPathCandidate.PackageRoot -Right $currentCodex.PackageRoot) -and
     (Test-DreamSkinPathEqual -Left $savedPathCandidate.Executable -Right $currentCodex.Executable))
   if ($null -ne $savedPathCandidate -and $null -eq $savedCodex -and -not $candidateMatchesCurrent) {
-    $unverifiedSavedRunning = (Get-DreamSkinCodexProcesses -Codex $savedPathCandidate -ProfilePath $ProfilePath).Count -gt 0
+    $unverifiedSavedRunning = @(Get-DreamSkinCodexProcesses -Codex $savedPathCandidate -ProfilePath $ProfilePath).Count -gt 0
     $unverifiedSavedOwnsPort = Test-DreamSkinCodexPortOwner -Port $Port -Codex $savedPathCandidate -ProfilePath $ProfilePath
     if ($unverifiedSavedRunning -or $unverifiedSavedOwnsPort) {
       throw 'The saved Codex path is still active but no longer matches a registered OpenAI.Codex package. Close it manually; state was preserved.'
     }
   }
 
-  $currentProcesses = Get-DreamSkinCodexProcesses -Codex $currentCodex -ProfilePath $ProfilePath
+  # Function output enumerates arrays; collect it again before using Count
+  # (in particular, PS5.1 singleton PSCustomObject.Count can be null).
+  $currentProcesses = @(Get-DreamSkinCodexProcesses -Codex $currentCodex -ProfilePath $ProfilePath)
   $codexToStop = $currentCodex
   $cdpIdentity = Get-DreamSkinVerifiedCdpIdentity -Port $Port -Codex $currentCodex -ProfilePath $ProfilePath
   if ($null -eq $cdpIdentity) {
@@ -229,7 +231,7 @@ try {
   $savedIsDifferent = [bool]($null -ne $savedCodex -and
     -not (Test-DreamSkinPathEqual -Left $savedCodex.Executable -Right $currentCodex.Executable))
   if ($savedIsDifferent) {
-    $savedProcesses = Get-DreamSkinCodexProcesses -Codex $savedCodex -ProfilePath $ProfilePath
+    $savedProcesses = @(Get-DreamSkinCodexProcesses -Codex $savedCodex -ProfilePath $ProfilePath)
     $savedOwnsPort = Test-DreamSkinCodexPortOwner -Port $Port -Codex $savedCodex -ProfilePath $ProfilePath
     if ($currentProcesses.Count -gt 0 -and ($savedProcesses.Count -gt 0 -or $savedOwnsPort)) {
       throw 'Multiple registered Codex package versions are active. Close them manually before starting Dream Skin.'
@@ -263,11 +265,11 @@ try {
     $cdpIdentity = $null
   }
   $debugReady = $null -ne $cdpIdentity
-  $codexProcesses = if (Test-DreamSkinPathEqual -Left $codexToStop.Executable -Right $currentCodex.Executable) {
+  $codexProcesses = @(if (Test-DreamSkinPathEqual -Left $codexToStop.Executable -Right $currentCodex.Executable) {
     $currentProcesses
   } else {
     Get-DreamSkinCodexProcesses -Codex $codexToStop -ProfilePath $ProfilePath
-  }
+  })
   $closedExistingCodex = $false
   if ($RepairWatcherOnly -and -not $debugReady) {
     throw 'Watcher-only repair requires an existing verified CDP endpoint; Codex was not launched or restarted.'

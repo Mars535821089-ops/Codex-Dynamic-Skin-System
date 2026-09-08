@@ -321,6 +321,107 @@ function ConvertTo-TestPowerShellLiteral {
   return "'" + $Value.Replace("'", "''") + "'"
 }
 
+function Invoke-TestInterruptedReplacement {
+  param(
+    [Parameter(Mandatory = $true)][string]$TemporaryRoot,
+    [Parameter(Mandatory = $true)][string]$Destination,
+    [Parameter(Mandatory = $true)][string]$Backup,
+    [Parameter(Mandatory = $true)][scriptblock]$Recover,
+    [ValidateRange(100, 30000)][int]$ReadyTimeoutMilliseconds = 15000
+  )
+  $fixtureId = [guid]::NewGuid().ToString('N')
+  $phasePath = Join-Path $TemporaryRoot ("interruption-$fixtureId.phase")
+  $stdoutPath = Join-Path $TemporaryRoot ("interruption-$fixtureId.stdout")
+  $stderrPath = Join-Path $TemporaryRoot ("interruption-$fixtureId.stderr")
+  $phaseLiteral = ConvertTo-TestPowerShellLiteral -Value $phasePath
+  $destinationLiteral = ConvertTo-TestPowerShellLiteral -Value $Destination
+  $backupLiteral = ConvertTo-TestPowerShellLiteral -Value $Backup
+  # Use the same real named-mutex factory as recovery, without loading unrelated
+  # theme operations into this disposable child.
+  $mutexDefinition = (Get-Command New-DreamSkinThemeImportMutex -ErrorAction Stop).Definition
+  $childScript = @"
+`$ErrorActionPreference = 'Stop'
+function New-DreamSkinThemeImportMutex {
+$mutexDefinition
+}
+[System.IO.File]::WriteAllText($phaseLiteral, 'waiting-for-lock')
+`$mutex = New-DreamSkinThemeImportMutex
+if (-not `$mutex.WaitOne(5000)) { throw 'Interruption fixture could not acquire its mutex.' }
+[System.IO.File]::WriteAllText($phaseLiteral, 'locked')
+[System.IO.Directory]::Move($destinationLiteral, $backupLiteral)
+[System.IO.File]::WriteAllText($phaseLiteral, 'backup-moved')
+# Keep ownership until the parent terminates this exact child. FailFast can
+# enter Windows crash reporting instead of exiting promptly in unattended CI.
+[System.Threading.Thread]::Sleep([System.Threading.Timeout]::Infinite)
+"@
+  $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($childScript))
+  $currentProcess = Get-Process -Id $PID -ErrorAction Stop
+  try { $powerShellExecutable = $currentProcess.Path } finally { $currentProcess.Dispose() }
+  if (-not $powerShellExecutable -or
+    -not (Test-Path -LiteralPath $powerShellExecutable -PathType Leaf)) {
+    throw 'Could not resolve the current PowerShell executable for the interruption test.'
+  }
+  # Retain an unowned handle across child exit. Without it, the last kernel
+  # mutex handle can disappear and recovery merely creates a new, unowned lock.
+  $witness = New-DreamSkinThemeImportMutex
+  $witnessOwned = $false
+  $child = $null
+  try {
+    $child = Start-Process -FilePath $powerShellExecutable -ArgumentList @(
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'RemoteSigned',
+      '-EncodedCommand', $encoded
+    ) -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+    [void]$child.Handle
+    $clock = [System.Diagnostics.Stopwatch]::StartNew()
+    $phase = 'starting'
+    while ($clock.ElapsedMilliseconds -lt $ReadyTimeoutMilliseconds) {
+      if (Test-Path -LiteralPath $phasePath -PathType Leaf) {
+        try { $phase = [System.IO.File]::ReadAllText($phasePath) }
+        catch [System.IO.IOException] {
+          # The child may be replacing the short phase text at this instant.
+          # Retry within the same deadline, never mistake a sharing race for exit.
+        }
+      }
+      if ($child.HasExited) {
+        $details = if (Test-Path -LiteralPath $stderrPath) { [System.IO.File]::ReadAllText($stderrPath) } else { '' }
+        throw "Interruption child exited before the backup boundary ($phase): $details"
+      }
+      if ($phase -ceq 'backup-moved') { break }
+      Start-Sleep -Milliseconds 25
+    }
+    if ($phase -cne 'backup-moved') { throw "Interruption child readiness timed out ($phase)." }
+    if ((Test-Path -LiteralPath $Destination) -or
+      -not (Test-Path -LiteralPath $Backup -PathType Container)) {
+      throw 'Interruption child did not move the canonical theme to its backup.'
+    }
+    try { $witnessOwned = $witness.WaitOne(0) }
+    catch [System.Threading.AbandonedMutexException] {
+      $witnessOwned = $true
+      throw 'Interruption child abandoned its lock before the parent terminated it.'
+    }
+    if ($witnessOwned) { throw 'Interruption child did not retain ownership of the recovery mutex.' }
+    # Kill only the bound fixture handle, bypassing crash-reporting UI. No
+    # finally block releases the child's mutex, so real recovery must accept
+    # AbandonedMutexException while the witness keeps the kernel object alive.
+    $child.Kill()
+    if (-not $child.WaitForExit(5000)) { throw 'Interruption child did not exit within five seconds.' }
+    if ($child.ExitCode -eq 0) { throw 'Interruption child unexpectedly exited cleanly.' }
+    & $Recover
+  } finally {
+    try {
+      if ($null -ne $child) {
+        try {
+          if (-not $child.HasExited) { $child.Kill() }
+          if (-not $child.WaitForExit(5000)) { throw 'Interruption fixture cleanup timed out.' }
+        } finally { $child.Dispose() }
+      }
+    } finally {
+      try { if ($witnessOwned) { $witness.ReleaseMutex() } }
+      finally { $witness.Dispose() }
+    }
+  }
+}
+
 function Assert-TestImportRejected {
   param([Parameter(Mandatory = $true)][string]$Archive, [Parameter(Mandatory = $true)][string]$Label)
   $savedBefore = @(Get-ChildItem -LiteralPath $paths.Saved -Directory -Force -ErrorAction Stop | ForEach-Object Name | Sort-Object)
@@ -997,36 +1098,39 @@ try {
   $failFastTransaction = New-TestReplacementJournal -Paths $paths `
     -Destination $failFastDestination -Stage $failFastStage `
     -OldFingerprint $failFastOldFingerprint -NewFingerprint $failFastNewFingerprint
-  $themeScriptLiteral = ConvertTo-TestPowerShellLiteral `
-    -Value (Join-Path $Root 'scripts\theme-windows.ps1')
-  $destinationLiteral = ConvertTo-TestPowerShellLiteral -Value $failFastDestination
-  $backupLiteral = ConvertTo-TestPowerShellLiteral -Value $failFastTransaction.Backup
-  $failFastChildScript = @"
-`$ErrorActionPreference = 'Stop'
-. $themeScriptLiteral
-`$mutex = New-DreamSkinThemeImportMutex
-`$null = `$mutex.WaitOne()
-[System.IO.Directory]::Move($destinationLiteral, $backupLiteral)
-[System.Environment]::FailFast('DreamSkin replacement interruption test')
-"@
-  $encodedFailFastScript = [Convert]::ToBase64String(
-    [System.Text.Encoding]::Unicode.GetBytes($failFastChildScript)
-  )
-  $powerShellExecutable = (Get-Process -Id $PID -ErrorAction Stop).Path
-  if (-not $powerShellExecutable -or
-    -not (Test-Path -LiteralPath $powerShellExecutable -PathType Leaf)) {
-    throw 'Could not resolve the current PowerShell executable for the fail-fast test.'
+  Write-Host 'ZIP phase: bounded interruption and abandoned-mutex recovery.'
+  Invoke-TestInterruptedReplacement -TemporaryRoot $temporaryRoot `
+    -Destination $failFastDestination -Backup $failFastTransaction.Backup -Recover {
+      $null = Initialize-DreamSkinThemeStore -SkillRoot $Root -StateRoot $stateRoot
+    }
+  $blockedDestination = Join-Path $temporaryRoot 'blocked-interruption-source'
+  $blockedBackup = Join-Path $temporaryRoot 'blocked-interruption-backup'
+  New-Item -ItemType Directory -Path $blockedDestination | Out-Null
+  $blockedMutex = New-DreamSkinThemeImportMutex
+  $blockedOwned = $false
+  $blockedClock = [System.Diagnostics.Stopwatch]::StartNew()
+  $blockedRejected = $false
+  try {
+    $blockedOwned = $blockedMutex.WaitOne(0)
+    if (-not $blockedOwned) { throw 'Could not hold the bounded-timeout fixture mutex.' }
+    try {
+      Invoke-TestInterruptedReplacement -TemporaryRoot $temporaryRoot `
+        -Destination $blockedDestination -Backup $blockedBackup -ReadyTimeoutMilliseconds 1000 `
+        -Recover { throw 'A blocked child must not run replacement recovery.' }
+    } catch {
+      $blockedRejected = $_.Exception.Message -like 'Interruption child readiness timed out*'
+      if (-not $blockedRejected) { throw }
+    }
+  } finally {
+    if ($blockedOwned) { $blockedMutex.ReleaseMutex() }
+    $blockedMutex.Dispose()
   }
-  $failFastProcess = Start-Process -FilePath $powerShellExecutable -ArgumentList @(
-    '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'RemoteSigned',
-    '-EncodedCommand', $encodedFailFastScript
-  ) -Wait -PassThru
-  if ($failFastProcess.ExitCode -eq 0 -or
-    (Test-Path -LiteralPath $failFastDestination) -or
-    -not (Test-Path -LiteralPath $failFastTransaction.Backup -PathType Container)) {
-    throw 'The fail-fast child did not terminate after moving the canonical theme to its backup.'
+  if (-not $blockedRejected -or $blockedClock.ElapsedMilliseconds -ge 10000 -or
+    -not (Test-Path -LiteralPath $blockedDestination -PathType Container) -or
+    (Test-Path -LiteralPath $blockedBackup)) {
+    throw 'Blocked interruption fixture did not fail promptly without moving its source.'
   }
-  $null = Initialize-DreamSkinThemeStore -SkillRoot $Root -StateRoot $stateRoot
+  Write-Host 'ZIP phase: interruption recovery and bounded child cleanup passed.'
   $failFastRestored = Read-DreamSkinTheme `
     -ThemeDirectory $failFastDestination -SkipImageMetadata
   if ("$($failFastRestored.Theme.quote)" -cne 'RESTART FAILFAST OLD' -or
@@ -1035,7 +1139,7 @@ try {
     (Test-Path -LiteralPath $failFastTransaction.Backup) -or
     (Test-Path -LiteralPath $failFastTransaction.Stage) -or
     (Test-Path -LiteralPath $failFastTransaction.Path)) {
-    throw 'Abandoned-mutex recovery did not restore the exact old theme after child FailFast.'
+    throw 'Abandoned-mutex recovery did not restore the exact old theme after child termination.'
   }
 
   $restartCommitDestination = Join-Path $paths.Saved 'restart-commit-id'

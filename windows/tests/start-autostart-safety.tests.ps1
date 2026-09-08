@@ -16,7 +16,7 @@ function Invoke-StartFixture {
   param([string]$Mode, [string]$Activity = 'idle', [switch]$Recycled, [switch]$Paused,
     [switch]$DisappearDuringProbe, [switch]$FailVerify,
     [switch]$LockBusy, [switch]$Latched, [switch]$CorruptHistory,
-    [switch]$FailHistoryWrite, [switch]$FailStop, [switch]$FailLaunch,
+    [switch]$FailHistoryWrite, [switch]$FailStop, [switch]$FailLaunch, [switch]$LegacyScalarCount,
     [ValidateSet('alive','missing','reused','at-lock','at-probe','after-stop','at-endpoint')][string]$ParentState = 'alive',
     [ValidateSet('enabled','missing','revoked-during-probe')][string]$ConsentState = 'enabled')
   $script:events = @()
@@ -93,7 +93,13 @@ function Invoke-StartFixture {
   function Test-DreamSkinPathEqual { param($Left,$Right); return $Left -eq $Right }
   function Get-DreamSkinCodexProcesses {
     param($Codex,$ProfilePath,[switch]$AllProfiles)
-    if ($script:running) { return @([pscustomobject]@{ProcessId=909}) }; return @()
+    if ($script:running) {
+      # PS5.1 singleton PSCustomObject results have a null Count. Preserve
+      # pipeline enumeration and reproduce that behavior on newer engines.
+      if ($LegacyScalarCount) { return @([pscustomobject]@{ProcessId=909;Count=$null}) }
+      return @([pscustomobject]@{ProcessId=909})
+    }
+    return @()
   }
   function Get-Process {
     param($Id)
@@ -219,6 +225,14 @@ if ($result.Failure -or $result.AllowForce -or
   @($result.Events | Where-Object { $_ -eq 'launch-codex' }).Count -ne 1 -or
   $result.Events.IndexOf('activity-probe') -gt $result.Events.IndexOf('stop-codex')) {
   throw "Idle automatic startup did not perform one non-force, activity-checked restart: $($result.Failure)"
+}
+$checks++
+$result=Invoke-StartFixture -Mode auto -LegacyScalarCount
+if ($result.Failure -or $result.AllowForce -or -not $result.History.RestartLatched -or
+  @($result.Events | Where-Object { $_ -eq 'stop-codex' }).Count -ne 1 -or
+  @($result.Events | Where-Object { $_ -eq 'launch-codex' }).Count -ne 1 -or
+  $result.Events.IndexOf('activity-probe') -gt $result.Events.IndexOf('stop-codex')) {
+  throw "A singleton process with PS5.1 null Count bypassed the checked restart: $($result.Failure)"
 }
 $checks++
 $result=Invoke-StartFixture -Mode auto -FailVerify
