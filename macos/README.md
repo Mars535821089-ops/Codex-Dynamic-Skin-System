@@ -49,6 +49,34 @@ preflights before suspending the monitor; if a later step fails, a monitor that
 was running before the attempt is resumed. A successful uninstall removes the
 monitor, state, logs, and native-mode marker together.
 
+## When the theme disappears while tasks are running
+
+Inspect the installed engine without changing the current application:
+
+```bash
+bash "$HOME/.codex/codex-dream-skin-studio/scripts/status-dream-skin-macos.sh" --json --deep
+```
+
+If the current Codex process still exposes its verified CDP endpoint, repair only
+the external watcher with the port reported by status (9341 in this example):
+
+```bash
+bash "$HOME/.codex/codex-dream-skin-studio/scripts/start-dream-skin-macos.sh" --repair-watcher-only --port 9341
+```
+
+This repair verifies the endpoint before replacing the watcher. It does not
+restart, activate, or reload Codex, and it refuses to continue if the endpoint is
+unavailable. `cdpOk` alone is an HTTP reachability result; the repair additionally
+checks that the listener belongs to Codex.
+
+If Codex was opened normally without debugging enabled, starting another copy
+with debugging arguments can forward the request to that existing process
+without enabling the port. Repeated injection attempts cannot repair this
+condition. Preserve running tasks; when you later choose to quit Codex, launch
+it with `Start Codex Dream Skin.command`. Do not use `--restart-existing` during
+a no-restart repair. A healthy background monitor does not by itself confirm
+that the theme is active: the watcher and renderer must also verify successfully.
+
 ## Releases and updates
 
 Update checks use `Mars535821089-ops/Codex-Dynamic-Skin-System`, configured through `githubRepository` in `repository.json`.

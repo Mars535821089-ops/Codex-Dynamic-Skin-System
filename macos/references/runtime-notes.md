@@ -4,7 +4,8 @@
 - Use `Contents/Resources/cua_node/bin/node` from that bundle. Require Node.js 20+, a valid strict code signature, matching architecture, and OpenAI Team ID `2DC432GLL2` on both app and runtime.
 - State readers that can run before a validated launch must establish this runtime identity at their own execution boundary; never treat an inherited `NODE` value as proof of trust.
 - Do not ship a Node binary and do not depend on a globally installed `node` or `npm`.
-- Launch the official executable through a per-user `launchd` job with `--remote-debugging-address=127.0.0.1` and a selected port. LaunchServices may discard Chromium flags.
+- Launch the signed official executable directly with `--remote-debugging-address=127.0.0.1` and a selected port. The background monitor may supervise the injector, but must not keep the Codex application alive or reopen it after the user quits. LaunchServices may discard Chromium flags.
+- An ordinary app process already running without CDP cannot acquire these startup flags from a second executable invocation: the browser can forward that invocation to the existing process. Watcher-only repair requires an already verified CDP endpoint and must fail without restarting the app when it is absent.
 - Prefer port `9341`; scan through `9441` on collision and record the selected port in state.
 - Accept CDP only when the listener belongs to the discovered Codex main process or one of its legitimate descendants, the WebSocket URL is loopback-only, and an `app://` renderer exposes expected native shell markers.
 - Treat loopback CDP as locally privileged but unauthenticated. Keep the themed session limited to trusted local use and close the port through a full Restore when finished.
