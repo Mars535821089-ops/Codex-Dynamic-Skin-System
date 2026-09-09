@@ -2158,6 +2158,21 @@ async function runOwnedWatch(options) {
     return loadPayloadForOptions({ ...options, themeDir, themeLibrary: activeThemeLibrary,
       storage, displayMode: mode });
   };
+  // Preserve a saved choice while its library is unavailable, including later
+  // settings/asset refreshes and pause/resume. Only a committed user choice clears it.
+  let preserveUnavailableSelection = false;
+  const selectionChangeReasons = new Set([
+    "renderer-request", "external-selection", "restore-default-theme", "media-import", "media-import-existing",
+    "delete-theme-fallback", "delete-theme-catalog-refresh", "delete-theme-rollback",
+  ]);
+  const persistCurrentSelection = async (payload, mode = displayMode, reason = "source-watch") => {
+    if (!selectionFile || (preserveUnavailableSelection && !selectionChangeReasons.has(reason))) return false;
+    await writeThemeSelection(selectionFile, payload.theme.id, mode, {
+      allowAcceptanceThemePersistence: options.allowAcceptanceThemePersistence,
+    });
+    preserveUnavailableSelection = false;
+    return true;
+  };
   const refreshPayload = async (themeDir = selectedThemeDir, reason = "source-watch", mode = displayMode, prepared = null) => {
     const next = prepared ?? await loadWatchedPayload(themeDir, mode);
     if (next.revision === loadedPayload.revision) {
@@ -2184,9 +2199,7 @@ async function runOwnedWatch(options) {
           next.theme.id, next.revision, expectsVisibleDynamicRoot(next), true);
         if (!verified?.pass) throw new Error("Theme refresh verification failed");
       }
-      if (selectionFile) await writeThemeSelection(selectionFile, next.theme.id, mode, {
-        allowAcceptanceThemePersistence: options.allowAcceptanceThemePersistence,
-      });
+      await persistCurrentSelection(next, mode, reason);
       for (const { id, session, identifier } of attempts) {
         await removeEarlyPayload(session, earlyScripts.get(id));
         earlyScripts.set(id, identifier);
@@ -2255,7 +2268,20 @@ async function runOwnedWatch(options) {
     const key = `${selection.themeId}:${selection.mode}:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
     if (key === rejectedExternalSelectionKey) return;
     try {
+      if (preserveUnavailableSelection && options.themeLibrary) {
+        const location = await readThemeStoragePreference(themeStoragePreferencePath({
+          settingsPath: options.settings, themeLibrary: options.themeLibrary,
+        }), options.themeLibrary);
+        // A cheap mount check avoids rebuilding fallback media on every poll.
+        if (!location.available) return;
+      }
       const candidate = await loadPayloadForOptions({ ...options, resolveSelection: true });
+      // An unchanged saved choice is polled too. Its unresolved fallback is not
+      // a user request; retry after a later mount without overwriting the choice.
+      if (candidate.theme.id !== selection.themeId || (candidate.displayMode ?? "theme") !== selection.mode) {
+        await candidate.assetGeneration?.release();
+        return;
+      }
       await refreshPayload(candidate.themeDir ?? options.themeDir, "external-selection",
         candidate.displayMode ?? "theme", candidate);
       rejectedExternalSelectionKey = null;
@@ -2308,6 +2334,7 @@ async function runOwnedWatch(options) {
     activeThemeLibrary = Object.hasOwn(loadedPayload, "themeLibrary") ? loadedPayload.themeLibrary : options.themeLibrary;
     displayMode = loadedPayload.displayMode ?? "theme";
     const initialSelection = selectionFile ? await readThemeSelection(selectionFile) : null;
+    preserveUnavailableSelection = Boolean(initialSelection && options.themeLibrary && !activeThemeLibrary);
     if (displayMode !== "native" && initialSelection?.themeId === loadedPayload.theme.id && initialSelection.mode === "native") {
       displayMode = "native";
       const themedPayload = loadedPayload;
@@ -2315,11 +2342,7 @@ async function runOwnedWatch(options) {
       loadedPayload = nativePayload;
       await themedPayload.assetGeneration?.release();
     }
-    if (selectionFile) {
-      await writeThemeSelection(selectionFile, loadedPayload.theme.id, displayMode, {
-        allowAcceptanceThemePersistence: options.allowAcceptanceThemePersistence,
-      });
-    }
+    await persistCurrentSelection(loadedPayload);
     lastStrongThemeAuditAt = Date.now();
     paused = await fileExists(options.pauseFile);
     while (!stopping) {
@@ -2477,11 +2500,7 @@ async function runOwnedWatch(options) {
           }
         }
         if (payloadChanged) await previousPayload.assetGeneration?.release();
-        if (payloadChanged && selectionFile) {
-          await writeThemeSelection(selectionFile, loadedPayload.theme.id, displayMode, {
-            allowAcceptanceThemePersistence: options.allowAcceptanceThemePersistence,
-          });
-        }
+        if (payloadChanged) await persistCurrentSelection(loadedPayload);
         console.log(paused ? "[dream-skin] paused" : `[dream-skin] active theme ${loadedPayload.theme.id}`);
       }
 

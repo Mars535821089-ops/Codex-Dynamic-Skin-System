@@ -9,7 +9,7 @@ function extractWatcherSource(rawSource) {
   // Normalize checkout line endings only; execute the real source unchanged
   // otherwise, and keep all extraction boundaries mandatory.
   const source = rawSource.replace(/\r\n/g, "\n");
-  const start = source.indexOf("  const refreshPayload = async ");
+  const start = source.indexOf("  let preserveUnavailableSelection = ");
   const end = source.indexOf("  const libraryController = ", start);
   assert.ok(start >= 0 && end > start, "The real watcher refresh transaction must remain covered");
   const watchStart = source.indexOf("  const applyExternalSelection = async ");
@@ -109,6 +109,7 @@ function watchFixture(script = extracted.watcher) {
     selection: { themeId: "local.test.new", mode: "theme" },
     selectionStat: { dev: 1, ino: 2, size: 100, mtimeMs: 1, ctimeMs: 1 },
     rejectedExternalSelectionKey: null, rejectedSourceRevision: null, nextSourceRetryAt: 0,
+    preserveUnavailableSelection: false,
     lastStrongThemeAuditAt: 0, STRONG_THEME_AUDIT_MS: 30000, options: { themeDir: "/old" },
     candidateRevision: "new", failLoad: false, failRefresh: true,
     readThemeSelection: async () => { calls.selectionReads++; return state.selection; },

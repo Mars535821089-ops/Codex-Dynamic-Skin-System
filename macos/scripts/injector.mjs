@@ -2685,11 +2685,20 @@ async function runOwnedWatch(options) {
     });
   };
   let current = await loadWatchedPayload(selectedThemeDir, displayMode);
-  const persistCurrentSelection = async (payload) => {
+  // An unmounted library is a temporary fallback, not a new user selection.
+  // Keep this protection through automatic refreshes until a user choice commits.
+  let preserveUnavailableSelection = Boolean(initialSelection && storageLocation?.available === false);
+  const selectionChangeReasons = new Set([
+    "renderer-request", "settings-and-theme-save", "restore-default-theme",
+    "media-import", "media-import-existing", "delete-theme-fallback", "delete-theme-catalog-refresh",
+  ]);
+  const persistCurrentSelection = async (payload, reason = "source-watch") => {
     if (!selectionFile || !payload?.themeDirectories?.has(payload.theme.id)) return false;
+    if (preserveUnavailableSelection && !selectionChangeReasons.has(reason)) return false;
     await writeThemeSelection(selectionFile, payload.theme.id, payload.displayMode ?? "theme", {
       allowAcceptanceThemePersistence: options.allowAcceptanceThemePersistence,
     });
+    preserveUnavailableSelection = false;
     return true;
   };
   await persistCurrentSelection(current);
@@ -2899,7 +2908,7 @@ async function runOwnedWatch(options) {
     }
     const previous = current;
     if (controlOnly || mutationEpoch !== refreshEpoch) {
-      await persistCurrentSelection(next);
+      await persistCurrentSelection(next, reason);
       current = next;
       displayMode = next.displayMode ?? requestedDisplayMode;
       selectedThemeDir = requestedThemeDir;
@@ -2953,7 +2962,7 @@ async function runOwnedWatch(options) {
       && !controlOnly && mutationEpoch === refreshEpoch);
     if (committed) {
       try {
-        await persistCurrentSelection(next);
+        await persistCurrentSelection(next, reason);
       } catch (error) {
         committed = false;
         console.error(`[dream-skin] theme selection could not be persisted: ${error.message}`);
