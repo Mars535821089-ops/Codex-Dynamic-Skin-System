@@ -23,6 +23,19 @@ repair only the theme watcher of a Codex process that already has the verified
 loopback debugging flags. It never quits, signals, restarts, or activates an
 ordinary Codex process, and it preserves an intentional paused state.
 
+For one-click themed startup, install the independent **Codex Theme Launcher**:
+
+```bash
+bash ./macos/scripts/install-theme-launcher.sh --desktop
+```
+
+Building it requires the Xcode Command Line Tools. The launcher opens a closed
+Codex with the required startup flags; if Codex is already open, it only brings
+the existing app forward, without reapplying the theme. It never restarts Codex
+and does not run at login. Installation leaves current sessions untouched.
+Optional exact-target Dock routing, rollback, and the limits of bypassing this
+entry are documented in [One-click themed launch](../docs/install-macos.md#one-click-themed-launch-dock--desktop).
+
 Automatic restart of ordinary Codex is an elevated, explicit opt-in:
 
 ```bash

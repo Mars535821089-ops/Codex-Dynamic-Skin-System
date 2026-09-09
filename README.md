@@ -32,7 +32,8 @@ Codex Dynamic Skin System 是一个面向 Codex Desktop 的跨平台动态主题
 1. 无需另行安装 Node.js；安装器使用官方 Codex 内置并经过签名校验的 Node.js 运行时。
 2. 下载仓库后运行 `macos/Install Codex Dream Skin.command`。
 3. 使用 `macos/Customize Codex Dream Skin.command` 导入或切换主题。
-4. 如需撤销，运行 `macos/Restore Codex Dream Skin.command`；该显式恢复入口会还原安装前的基础主题，并在完成后重新打开 Codex。
+4. 如需以后点击图标就带主题启动，安装引擎后运行 `bash ./macos/scripts/install-theme-launcher.sh --desktop`（构建需要 Xcode Command Line Tools）。以后点击 **Codex Theme Launcher**；Codex 已开着时只切回原窗口，不重复应用、不重启。可选替换现有 Dock 入口的步骤见 [安装说明](docs/install-macos.md#one-click-themed-launch-dock--desktop)。
+5. 如需撤销，运行 `macos/Restore Codex Dream Skin.command`；该显式恢复入口会还原安装前的基础主题，并在完成后重新打开 Codex。
 
 ### Windows
 

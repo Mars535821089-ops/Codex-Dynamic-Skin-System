@@ -1093,15 +1093,12 @@ launch_codex_with_cdp() {
   : > "$APP_LOG"
   : > "$APP_ERROR_LOG"
   release_codex_launchd_job
-  # Start as a normal user process (NOT launchctl submit). submit keeps a job
-  # that will restart Codex when the window is closed.
-  /usr/bin/open -na "$CODEX_BUNDLE" --args "${launch_args[@]}" \
-    >>"$APP_LOG" 2>>"$APP_ERROR_LOG" || true
-  # Fallback if open failed to pass args on some builds
-  if ! codex_is_running; then
-    /usr/bin/nohup "$CODEX_EXE" "${launch_args[@]}" \
-      >>"$APP_LOG" 2>>"$APP_ERROR_LOG" &
-  fi
+  # Pass Chromium switches at process creation: a successful LaunchServices
+  # request does not prove the resulting process retained them. Launch the
+  # signed executable once, preserving the normal default profile. Do not use
+  # launchctl submit, which can reopen Codex after the user quits.
+  /usr/bin/nohup "$CODEX_EXE" "${launch_args[@]}" \
+    >>"$APP_LOG" 2>>"$APP_ERROR_LOG" &
 }
 
 launch_codex_normally() {

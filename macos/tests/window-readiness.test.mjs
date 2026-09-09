@@ -361,11 +361,8 @@ assert.equal(
   "Window readiness must never weaken exact payload verification.",
 );
 
-assert.match(
-  commonSource,
-  /local launch_args=\([\s\S]*?"--remote-debugging-address=127\.0\.0\.1"[\s\S]*?"--remote-debugging-port=\$port"[\s\S]*?\/usr\/bin\/open -na "\$CODEX_BUNDLE" --args "\$\{launch_args\[@\]\}"/,
-  "The first launch must retain a new CDP-enabled app instance.",
-);
+// codex-launch-argv.test.mjs executes the production launch function with
+// mocked process boundaries to verify CDP flags and single-launch behavior.
 for (const flag of [
   "--disable-background-media-suspend",
   "--disable-backgrounding-occluded-windows",
