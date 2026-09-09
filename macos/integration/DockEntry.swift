@@ -102,11 +102,11 @@ do {
         guard let originals = backup["persistent-apps"] as? [[String: Any]] else { try fail("Backup has no persistent-apps array") }
         for index in after.indices where matches(after[index], launcher, launcherID) {
             guard let guid = after[index]["GUID"] as? NSNumber else { try fail("Launcher tile has no GUID") }
-            let matches = originals.filter { ($0["GUID"] as? NSNumber) == guid && matches($0, target, officialID) }
+            let originalTiles = originals.filter { ($0["GUID"] as? NSNumber) == guid && matches($0, target, officialID) }
             // A separately pinned launcher is not owned by this backup.
-            if matches.isEmpty { continue }
-            guard matches.count == 1 else { try fail("Backup does not identify exactly one original tile") }
-            after[index] = matches[0]
+            if originalTiles.isEmpty { continue }
+            guard originalTiles.count == 1 else { try fail("Backup does not identify exactly one original tile") }
+            after[index] = originalTiles[0]
             changed += 1
         }
     } else {
