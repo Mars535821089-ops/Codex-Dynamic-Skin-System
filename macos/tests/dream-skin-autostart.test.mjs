@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import {
   classifyCodexProcesses,
@@ -27,6 +30,177 @@ function snapshot(overrides = {}) {
     ...overrides,
   };
 }
+
+const execFileAsync = promisify(execFile);
+const inactiveStatus = { session: "off", operation: "", injectorAlive: false, codexPid: 0 };
+
+// Run the real monitor CLI and state I/O, replacing only its external processes.
+// The preload never delegates to real ps/bash, even for an unexpected command.
+async function runMonitorFixture({
+  cdp = true,
+  allowRestart = false,
+  rounds = [{ statuses: [inactiveStatus] }],
+  initialState,
+} = {}) {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "dream-skin-monitor-"));
+  try {
+    const startScript = path.join(root, "start.sh");
+    const statusScript = path.join(root, "status.sh");
+    const statePath = path.join(root, "monitor.json");
+    const callsPath = path.join(root, "calls.jsonl");
+    const sessionsRoot = path.join(root, "sessions");
+    const preloadPath = path.join(root, "process-preload.mjs");
+    await fsp.mkdir(sessionsRoot);
+    await fsp.writeFile(startScript, "exit 99\n");
+    await fsp.writeFile(statusScript, "exit 99\n");
+    if (initialState) await fsp.writeFile(statePath, JSON.stringify(initialState));
+    await fsp.writeFile(preloadPath, String.raw`
+import childProcess from "node:child_process";
+import fs from "node:fs";
+import { EventEmitter } from "node:events";
+import { syncBuiltinESMExports } from "node:module";
+import { PassThrough } from "node:stream";
+const statuses = JSON.parse(process.env.TEST_STATUSES);
+let statusIndex = 0;
+childProcess.spawn = (command, args) => {
+  fs.appendFileSync(process.env.TEST_CALLS, JSON.stringify({ command, args }) + "\n");
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  queueMicrotask(() => {
+    let output = "";
+    let code = 0;
+    if (command === "/bin/ps" && args[0] === "-axo") {
+      output = "42 /fixture/Codex.app/Contents/MacOS/Codex" +
+        (process.env.TEST_CDP === "1" ? " --remote-debugging-address=127.0.0.1 --remote-debugging-port=9341" : "") + "\n";
+    } else if (command === "/bin/ps" && args[0] === "-p") {
+      output = new Date(Date.now() - Number(process.env.TEST_APP_AGE_MS)).toISOString() + "\n";
+    } else if (command === "/bin/bash" && args[0] === process.env.TEST_STATUS) {
+      output = JSON.stringify(statuses[Math.min(statusIndex++, statuses.length - 1)]) + "\n";
+    } else if (command !== "/bin/bash" || args[0] !== process.env.TEST_START) {
+      code = 99;
+      child.stderr.write("Unexpected external process: " + command);
+    }
+    child.stdout.end(output);
+    child.stderr.end();
+    child.emit("exit", code);
+  });
+  return child;
+};
+syncBuiltinESMExports();
+`);
+    const results = [];
+    for (const round of rounds) {
+      await fsp.writeFile(callsPath, "");
+      const args = [
+        "--import", preloadPath,
+        fileURLToPath(new URL("../scripts/dream-skin-autostart.mjs", import.meta.url)),
+        "--once", "--app-executable", "/fixture/Codex.app/Contents/MacOS/Codex",
+        "--start-script", startScript, "--status-script", statusScript,
+        "--state", statePath, "--sessions-root", sessionsRoot,
+        "--disabled-marker", path.join(root, "native.disabled"), "--grace-ms", "100",
+      ];
+      if (allowRestart) args.push("--allow-codex-restart");
+      await execFileAsync(process.execPath, args, {
+        timeout: 10_000,
+        env: {
+          ...process.env,
+          TEST_CALLS: callsPath, TEST_START: startScript, TEST_STATUS: statusScript,
+          TEST_CDP: cdp ? "1" : "0",
+          TEST_STATUSES: JSON.stringify(round.statuses),
+          TEST_APP_AGE_MS: String(round.appAgeMs ?? 60_000),
+        },
+      });
+      const calls = (await fsp.readFile(callsPath, "utf8")).trim().split("\n").filter(Boolean).map(JSON.parse);
+      const state = await fsp.readFile(statePath, "utf8").then(JSON.parse, (error) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      });
+      results.push({
+        state,
+        starts: calls.filter(({ command, args: callArgs }) => command === "/bin/bash" && callArgs[0] === startScript),
+        statusProbes: calls.filter(({ command, args: callArgs }) => command === "/bin/bash" && callArgs[0] === statusScript).length,
+      });
+    }
+    return results;
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true });
+  }
+}
+
+for (const operation of ["applying", "pausing"]) {
+  test(`CLI defers ${operation} before injector state exists without declaring healthy`, async () => {
+    const [result] = await runMonitorFixture({ rounds: [{ statuses: [{ ...inactiveStatus, operation }] }] });
+    assert.equal(result.starts.length, 0);
+    assert.equal(result.state, null);
+    assert.equal(result.statusProbes, 1);
+  });
+
+  for (const cdp of [true, false]) {
+    test(`CLI cancels ${cdp ? "repair" : "authorized restart"} when ${operation} begins during grace`, async () => {
+      const [result] = await runMonitorFixture({
+        cdp, allowRestart: !cdp,
+        rounds: [{ statuses: [inactiveStatus, { ...inactiveStatus, operation }] }],
+      });
+      assert.equal(result.statusProbes, 2);
+      assert.equal(result.starts.length, 0);
+      assert.equal(result.state, null);
+    });
+  }
+}
+
+test("CLI does not clear a previous failure or restart latch while an operation is in progress", async () => {
+  const initialState = {
+    schemaVersion: 1, lastAction: "restart", lastAttemptPid: 42,
+    lastAttemptAt: Date.now() - cooldown - 1000, lastResult: "failed", observedStopped: false,
+  };
+  const [result] = await runMonitorFixture({
+    initialState,
+    rounds: [{ statuses: [{ session: "active", operation: "applying", injectorAlive: true, codexPid: 42 }] }],
+  });
+  assert.equal(result.starts.length, 0);
+  assert.deepEqual(result.state, initialState);
+});
+
+for (const expiredOperation of ["failed", ""]) {
+  test(`CLI resumes repair after status expires an operation to ${expiredOperation || "empty"}`, async () => {
+    const initialState = {
+      schemaVersion: 1, lastAction: "repair-watcher", lastAttemptPid: 42,
+      lastAttemptAt: Date.now() - cooldown - 1000, lastResult: "failed", observedStopped: false,
+    };
+    const results = await runMonitorFixture({
+      initialState,
+      rounds: [
+        { statuses: [{ ...inactiveStatus, operation: "applying" }] },
+        { statuses: [{ ...inactiveStatus, operation: expiredOperation }] },
+      ],
+    });
+    assert.equal(results[0].starts.length, 0);
+    assert.deepEqual(results[0].state, initialState, "busy must not renew the repair cooldown");
+    assert.equal(results[1].starts.length, 1, "expiration must not leave a permanent busy latch");
+    assert.deepEqual(results[1].starts[0].args.slice(1), ["--repair-watcher-only"]);
+    assert.equal(results[1].state.lastResult, "ok");
+  });
+}
+
+test("CLI grants a new compliant app startup grace and repairs after that grace", async () => {
+  const results = await runMonitorFixture({ rounds: [
+    { statuses: [inactiveStatus], appAgeMs: 0 },
+    { statuses: [inactiveStatus], appAgeMs: 10_001 },
+  ] });
+  assert.equal(results[0].starts.length, 0);
+  assert.equal(results[0].state, null);
+  assert.equal(results[1].starts.length, 1);
+  assert.deepEqual(results[1].starts[0].args.slice(1), ["--repair-watcher-only"]);
+});
+
+test("CLI still repairs an ordinary dead watcher and never restarts a plain app by default", async () => {
+  const [broken] = await runMonitorFixture();
+  assert.equal(broken.starts.length, 1);
+  assert.deepEqual(broken.starts[0].args.slice(1), ["--repair-watcher-only"]);
+  const [plain] = await runMonitorFixture({ cdp: false });
+  assert.equal(plain.starts.length, 0);
+});
 
 test("loopback CDP is sufficient and background anti-throttling remains optional", () => {
   const executable = "/Applications/Codex.app/Contents/MacOS/Codex";

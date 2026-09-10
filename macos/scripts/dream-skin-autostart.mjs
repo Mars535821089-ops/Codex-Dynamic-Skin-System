@@ -53,6 +53,8 @@ export function classifyCodexProcesses(listing, executable) {
 export function watcherStateFromStatus(output, expectedCodexPid) {
   try {
     const status = JSON.parse(String(output || ""));
+    // status bounds these operations by TTL; waiting must not acknowledge health.
+    if (status?.operation === "applying" || status?.operation === "pausing") return "in-progress";
     if (status?.session === "paused") return "paused";
     if (status?.injectorAlive === true && new Set(["active", "applying"]).has(status?.session)
         && (!Number.isSafeInteger(expectedCodexPid) || status?.codexPid === expectedCodexPid)) {
@@ -185,6 +187,9 @@ export function decideAutostartAction(
   if (snapshot.pids.length === 0) {
     return { action: "wait", reason: "stopped", observedStopped: true };
   }
+  if (snapshot.watcherState === "in-progress") {
+    return { action: "wait", reason: "operation-in-progress" };
+  }
   const compliantPid = snapshot.compliantPids[0];
   if (Number.isSafeInteger(compliantPid) && snapshot.watcherState === "healthy") {
     return { action: "wait", reason: "compliant" };
@@ -198,7 +203,7 @@ export function decideAutostartAction(
   if (!repairWatcher && !allowCodexRestart) {
     return { action: "wait", reason: "restart-not-authorized" };
   }
-  if (!repairWatcher && Number.isFinite(snapshot.appStartedAtMs)
+  if (Number.isFinite(snapshot.appStartedAtMs)
       && now - snapshot.appStartedAtMs < launchGraceMs) {
     return { action: "wait", reason: "launch-grace" };
   }
@@ -434,7 +439,7 @@ async function main() {
       const correctionStillRequired = supervisorStillEnabled && (
         decision.action === "restart"
           ? confirmed.plainPids.includes(decision.pid) && confirmed.compliantPids.length === 0
-            && confirmedWatcherState !== "healthy"
+            && confirmedWatcherState === "unhealthy"
           : confirmed.compliantPids.includes(decision.pid)
             && confirmedWatcherState === "unhealthy"
       );

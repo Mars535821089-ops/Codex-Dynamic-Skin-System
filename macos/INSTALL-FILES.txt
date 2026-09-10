@@ -135,6 +135,7 @@ tests/selected-theme-resolution.test.mjs
 tests/shell-braced-vars-before-cjk.test.mjs
 tests/state-persistence.test.sh
 tests/static-payload-assets.test.mjs
+tests/status-operation-contract.test.mjs
 tests/theme-config.test.mjs
 tests/theme-import-identity.test.sh
 tests/theme-import-kill-hook.cjs
