@@ -150,6 +150,58 @@ async function fixture(t, { mounted = false, selected = true, mode = "theme" } =
     options: { themeDir, themeLibrary, settings: path.join(root, "dynamic-settings.json") } };
 }
 
+for (const deniedAtRead of [1, 2, 3, 5]) {
+  test(`macos a single permission denial at storage read ${deniedAtRead} retries the selected theme`, async (t) => {
+    const f = await fixture(t, { mounted: true });
+    const external = await fs.realpath(path.dirname(f.selectedDirectory));
+    const originalReaddir = fs.readdir;
+    let reads = 0;
+    let denied = 0;
+    t.mock.method(fs, "readdir", async (directory, ...args) => {
+      if (path.resolve(String(directory)) === external && ++reads === deniedAtRead) {
+        denied++;
+        throw Object.assign(new Error("fixture one-time external storage denial"), { code: "EPERM" });
+      }
+      return originalReaddir.call(fs, directory, ...args);
+    });
+    const running = await startup("macos", f.options);
+    assert.equal(denied, 1, "the actual storage read must encounter exactly one EPERM");
+    assert.equal(running.themeId, "test.external-selected");
+    // Successful startup uses the existing formatted selection writer; the
+    // selected id and display mode must stay unchanged, not its whitespace.
+    assert.deepEqual(JSON.parse(await fs.readFile(f.selectionFile, "utf8")), JSON.parse(f.originalSelection));
+    const { loadPayloadForOptions } = await import("../../macos/scripts/injector.mjs");
+    const verified = await loadPayloadForOptions({ ...f.options, themeDir: f.selectedDirectory });
+    assert.equal(verified.revision, running.revision(), "recovered startup must agree with the resolved selected-theme verifier");
+  });
+}
+
+for (const deniedAtRead of [1, 2, 3, 5]) {
+  test(`macos permission loss at storage read ${deniedAtRead} keeps startup and verification consistent`, async (t) => {
+    const f = await fixture(t, { mounted: true });
+    const external = await fs.realpath(path.dirname(f.selectedDirectory));
+    const originalReaddir = fs.readdir;
+    let reads = 0;
+    let denied = 0;
+    const mock = t.mock.method(fs, "readdir", async (directory, ...args) => {
+      if (path.resolve(String(directory)) === external && ++reads >= deniedAtRead) {
+        denied++;
+        throw Object.assign(new Error("fixture external storage denied"), { code: "EPERM" });
+      }
+      return originalReaddir.call(fs, directory, ...args);
+    });
+    const running = await startup("macos", f.options);
+    assert.ok(denied > 0, "the actual storage read must encounter EPERM");
+    assert.equal(running.themeId, "test.local-fallback");
+    assert.equal(await fs.readFile(f.selectionFile, "utf8"), f.originalSelection);
+    const { loadPayloadForOptions } = await import("../../macos/scripts/injector.mjs");
+    const verified = await loadPayloadForOptions(f.options);
+    assert.equal(verified.revision, running.revision(), "watcher and verifier must agree on the fallback payload");
+    mock.mock.restore();
+    assert.equal((await startup("macos", f.options)).themeId, "test.external-selected");
+  });
+}
+
 for (const platform of ["macos", "windows"]) {
   for (const mode of ["theme", "native"]) {
     test(`${platform} cold-start fallback preserves an unavailable external selection in ${mode} mode`, async (t) => {

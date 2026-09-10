@@ -47,6 +47,7 @@ import {
   chooseThemeLibraryDirectory,
   finalizeThemeLibraryMigration,
   inspectThemeStorage,
+  isTransientThemeStorageError,
   migrateThemeLibrary,
   readThemeStoragePreference,
   rollbackThemeLibraryMigration,
@@ -1374,6 +1375,7 @@ export async function loadPayloadForOptions({
     if (storageLocation) {
       themeLibrary = storageLocation.root;
       const inspected = await inspectThemeStorage(storageLocation.configuredRoot);
+      if (!inspected.available) themeLibrary = null;
       storage = {
         path: storageLocation.configuredRoot,
         available: inspected.available,
@@ -1546,12 +1548,22 @@ function operationUiExpression(action, token, state = "loading", message = "") {
     const config = ${JSON.stringify(config)};
     const hostId = ${JSON.stringify(OPERATION_UI_HOST_ID)};
     const registryKey = ${JSON.stringify(OPERATION_UI_REGISTRY_KEY)};
+    const ownerDocument = document;
+    const latestTokenKey = registryKey + "_LATEST_TOKEN";
     const css = ${JSON.stringify(OPERATION_UI_CSS)};
     const revealDelayMs = 16;
     const minimumLoadingMs = 700;
     const stateTtl = (value) => value === "loading" ? 180000
       : value === "success" ? 1800 : value === "cancelled" ? 2400 : 6000;
     const issuedAt = (value) => Number(String(value).split(":")[1]) || 0;
+    const isOlderToken = (candidate, latest) => {
+      if (!latest || candidate === latest) return false;
+      const candidateParts = String(candidate).split(":");
+      const latestParts = String(latest).split(":");
+      return issuedAt(candidate) < issuedAt(latest)
+        || (issuedAt(candidate) === issuedAt(latest) && candidateParts[0] === latestParts[0]
+          && Number(candidateParts[2]) < Number(latestParts[2]));
+    };
     const positionInMainArea = (host) => {
       const main = document.querySelector(${selectorLiteral("shell-main")}) ||
         document.querySelector('[role="main"]') || document.documentElement;
@@ -1567,6 +1579,7 @@ function operationUiExpression(action, token, state = "loading", message = "") {
     };
     const clearTimer = (timer) => { if (timer) clearTimeout(timer); };
     const removeHost = (expectedToken, force = false) => {
+      if (document !== ownerDocument) return false;
       const host = document.getElementById(hostId);
       const registry = window[registryKey];
       if (!force && host?.dataset.operationToken !== expectedToken) return false;
@@ -1579,6 +1592,9 @@ function operationUiExpression(action, token, state = "loading", message = "") {
       return true;
     };
     if (config.action === "clear") {
+      // Clear the presentation, not ordering: delayed events remain stale in
+      // this document. Navigation creates a fresh document and watermark.
+      ownerDocument[latestTokenKey] ||= document.getElementById(hostId)?.dataset.operationToken;
       removeHost("", true);
       return { visible: false, cleared: true };
     }
@@ -1587,8 +1603,8 @@ function operationUiExpression(action, token, state = "loading", message = "") {
     }
     let host = document.getElementById(hostId);
     if (config.action === "show") {
-      const currentIssuedAt = Number(host?.dataset.operationIssuedAt || 0);
-      if (host?.dataset.operationToken !== config.token && currentIssuedAt > issuedAt(config.token)) {
+      const latestToken = ownerDocument[latestTokenKey] || host?.dataset.operationToken;
+      if (isOlderToken(config.token, latestToken)) {
         return { visible: false, stale: true };
       }
       removeHost("", true);
@@ -1620,6 +1636,8 @@ function operationUiExpression(action, token, state = "loading", message = "") {
       statusNode.append(indicator, messageNode);
       shadow.append(styleNode, statusNode);
       document.documentElement.append(host);
+      // Keep only the latest token after the host and its timer registry expire.
+      ownerDocument[latestTokenKey] = config.token;
       const registry = {
         token: config.token,
         startedAt: Date.now(),
@@ -1628,6 +1646,7 @@ function operationUiExpression(action, token, state = "loading", message = "") {
         terminalTimer: null,
       };
       registry.showTimer = setTimeout(() => {
+        if (document !== ownerDocument) return;
         const current = document.getElementById(hostId);
         if (current?.dataset.operationToken === config.token) current.dataset.visible = "true";
       }, revealDelayMs);
@@ -1648,6 +1667,7 @@ function operationUiExpression(action, token, state = "loading", message = "") {
       : 0;
     if (remainingLoadingMs > 0 && registry?.token === config.token) {
       registry.terminalTimer = setTimeout(() => {
+        if (document !== ownerDocument) return;
         const current = document.getElementById(hostId);
         const currentRegistry = window[registryKey];
         if (current?.dataset.operationToken !== config.token || currentRegistry?.token !== config.token) return;
@@ -2302,9 +2322,17 @@ async function runOneShot(options) {
   }
   let loaded = null;
   try {
-    loaded = (options.mode === "once" || options.mode === "verify" || options.reload)
-      ? await loadPayloadForOptions(options)
-      : null;
+    try {
+      loaded = (options.mode === "once" || options.mode === "verify" || options.reload)
+        ? await loadPayloadForOptions(options)
+        : null;
+    } catch (error) {
+      if (options.mode !== "verify" || !isTransientThemeStorageError(error)) throw error;
+      // A library can become unreadable after its initial availability probe.
+      // Rebuild once from the original options; never reuse partial storage or
+      // catalog metadata, and keep the exact renderer verification below.
+      loaded = await loadPayloadForOptions(options);
+    }
   } catch (error) {
     if (operationToken) {
       await Promise.all(connected.map(({ session }) => presentOperationUi(
@@ -2656,18 +2684,20 @@ async function runOwnedWatch(options) {
   let selectedThemeDir = options.themeDir;
   const initialSelection = selectionFile ? await readThemeSelection(selectionFile) : null;
   let displayMode = initialSelection?.mode ?? "theme";
-  if (activeThemeLibrary && selectionFile) {
-    const scanned = await scanThemeLibrary(activeThemeLibrary);
-    selectedThemeDir = await resolveInitialThemeDirectory({
-      fallbackThemeDir: options.themeDir,
-      selectionFile,
-      themeDirectories: scanned.themeDirectories,
-    });
-  }
+  const useUnavailableLibraryFallback = () => {
+    activeThemeLibrary = null;
+    if (storageLocation) storageLocation = { ...storageLocation, root: null, available: false };
+    selectedThemeDir = options.themeDir;
+  };
   const loadWatchedPayload = async (themeDir, requestedDisplayMode = displayMode) => {
     const inspected = storageLocation
       ? await inspectThemeStorage(storageLocation.configuredRoot)
       : null;
+    if (activeThemeLibrary && inspected?.available === false) {
+      throw Object.assign(new Error("Theme library became unavailable while preparing the payload"), {
+        code: "THEME_STORAGE_UNAVAILABLE",
+      });
+    }
     const storage = storageLocation && inspected ? {
       path: storageLocation.configuredRoot,
       available: inspected.available,
@@ -2684,7 +2714,43 @@ async function runOwnedWatch(options) {
       displayMode: requestedDisplayMode,
     });
   };
-  let current = await loadWatchedPayload(selectedThemeDir, displayMode);
+  const loadInitialSelectedPayload = async () => {
+    if (storageLocation?.available === false) {
+      throw Object.assign(new Error("Theme library is unavailable during startup"), {
+        code: "THEME_STORAGE_UNAVAILABLE",
+      });
+    }
+    if (activeThemeLibrary && selectionFile) {
+      const scanned = await scanThemeLibrary(activeThemeLibrary);
+      selectedThemeDir = await resolveInitialThemeDirectory({
+        fallbackThemeDir: options.themeDir,
+        selectionFile,
+        themeDirectories: scanned.themeDirectories,
+      });
+    }
+    return loadWatchedPayload(selectedThemeDir, displayMode);
+  };
+  const isUnavailableStartupError = (error) => Boolean(storageLocation
+    && (isTransientThemeStorageError(error) || error?.code === "THEME_STORAGE_UNAVAILABLE"));
+  let current;
+  try {
+    current = await loadInitialSelectedPayload();
+  } catch (error) {
+    if (!isUnavailableStartupError(error)) throw error;
+    // Retry the complete preference/selection/payload read once: a one-off
+    // denial must not strand a recovered library on the local fallback.
+    // Preference parse/security errors still escape this retry boundary.
+    storageLocation = await readThemeStoragePreference(storagePreference, defaultThemeLibrary);
+    activeThemeLibrary = storageLocation?.root ?? null;
+    selectedThemeDir = options.themeDir;
+    try {
+      current = await loadInitialSelectedPayload();
+    } catch (retryError) {
+      if (!isUnavailableStartupError(retryError)) throw retryError;
+      useUnavailableLibraryFallback();
+      current = await loadWatchedPayload(selectedThemeDir, displayMode);
+    }
+  }
   // An unmounted library is a temporary fallback, not a new user selection.
   // Keep this protection through automatic refreshes until a user choice commits.
   let preserveUnavailableSelection = Boolean(initialSelection && storageLocation?.available === false);

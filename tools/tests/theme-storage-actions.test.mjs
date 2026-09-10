@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { makeV2Package } from "./helpers/theme-fixtures.mjs";
+import * as storageActions from "../../macos/scripts/theme-storage-actions.mjs";
 
 import {
   finalizeThemeLibraryMigration,
@@ -48,6 +49,173 @@ test("an unavailable external library stays unavailable instead of falling back"
   assert.deepEqual(await readThemeStoragePreference(preference, fallback), {
     root: null, configuredRoot: missing, available: false, custom: true,
   });
+});
+
+test("transient storage classification excludes validation and programming errors", () => {
+  assert.equal(typeof storageActions.isTransientThemeStorageError, "function");
+  for (const code of ["EACCES", "EPERM", "ENOENT", "ENOTDIR", "ESTALE", "EIO"]) {
+    assert.equal(storageActions.isTransientThemeStorageError(Object.assign(new Error(code), { code })), true);
+  }
+  for (const error of [null, undefined, new TypeError("invalid path"), new Error("symbolic link"),
+    { code: "ELOOP" }, { code: "ERR_INVALID_ARG_TYPE" }]) {
+    assert.equal(storageActions.isTransientThemeStorageError(error), false);
+  }
+});
+
+test("custom library read failures report unavailable without changing the saved preference", async (t) => {
+  for (const method of ["lstat", "realpath", "readdir"]) {
+    for (const code of ["EACCES", "EPERM", "ENOENT", "ENOTDIR", "ESTALE", "EIO"]) {
+      await t.test(`${method}: ${code}`, async (t) => {
+        const root = await fs.realpath(await temporaryRoot(t));
+        const custom = path.join(root, "external");
+        const fallback = path.join(root, "fallback");
+        const preference = path.join(root, "theme-storage.json");
+        await fs.mkdir(custom);
+        await fs.mkdir(fallback);
+        await writeThemeStoragePreference(preference, custom);
+        const savedPreference = await fs.readFile(preference, "utf8");
+        const original = fs[method].bind(fs);
+        t.mock.method(fs, method, async (target, ...args) => {
+          if (target === custom) throw Object.assign(new Error(`${code}: ${method}`), { code });
+          return original(target, ...args);
+        });
+        assert.deepEqual(await readThemeStoragePreference(preference, fallback), {
+          root: null, configuredRoot: custom, available: false, custom: true,
+        });
+        assert.equal(await fs.readFile(preference, "utf8"), savedPreference);
+        assert.deepEqual(await fs.readdir(fallback), []);
+      });
+    }
+  }
+});
+
+test("a custom library becomes available when its directory can be scanned again", async (t) => {
+  const root = await fs.realpath(await temporaryRoot(t));
+  const custom = path.join(root, "external");
+  const preference = path.join(root, "theme-storage.json");
+  await fs.mkdir(custom);
+  await writeThemeStoragePreference(preference, custom);
+  let denied = true;
+  const original = fs.readdir.bind(fs);
+  t.mock.method(fs, "readdir", async (target, ...args) => {
+    if (target === custom && denied) throw Object.assign(new Error("permission denied"), { code: "EPERM" });
+    return original(target, ...args);
+  });
+  assert.deepEqual(await readThemeStoragePreference(preference, root), {
+    root: null, configuredRoot: custom, available: false, custom: true,
+  });
+  denied = false;
+  assert.deepEqual(await readThemeStoragePreference(preference, root), {
+    root: custom, configuredRoot: custom, available: true, custom: true,
+  });
+});
+
+test("configured library path stays stable when a canonical directory becomes unavailable", async (t) => {
+  const root = await fs.realpath(await temporaryRoot(t));
+  const actualParent = path.join(root, "actual");
+  const aliasParent = path.join(root, "alias");
+  const canonicalLibrary = path.join(actualParent, "library");
+  const configuredLibrary = path.join(aliasParent, "library");
+  const preference = path.join(root, "theme-storage.json");
+  await fs.mkdir(canonicalLibrary, { recursive: true });
+  await fs.symlink(actualParent, aliasParent, process.platform === "win32" ? "junction" : "dir");
+  await fs.writeFile(preference, JSON.stringify({ schemaVersion: 1, libraryRoot: configuredLibrary }));
+  let denied = false;
+  const original = fs.readdir.bind(fs);
+  t.mock.method(fs, "readdir", async (target, ...args) => {
+    if (target === canonicalLibrary && denied) {
+      throw Object.assign(new Error("permission denied"), { code: "EPERM" });
+    }
+    return original(target, ...args);
+  });
+  const available = await readThemeStoragePreference(preference, root);
+  denied = true;
+  const unavailable = await readThemeStoragePreference(preference, root);
+  assert.deepEqual(available, {
+    root: canonicalLibrary, configuredRoot: configuredLibrary, available: true, custom: true,
+  });
+  assert.deepEqual(unavailable, {
+    root: null, configuredRoot: configuredLibrary, available: false, custom: true,
+  });
+});
+
+test("storage inspection discards partial results when a directory or file becomes unreadable", async (t) => {
+  for (const [method, targetKind] of [["lstat", "root"], ["realpath", "root"],
+    ["readdir", "root"], ["readdir", "nested"], ["stat", "file"]]) {
+    for (const code of ["EACCES", "EPERM", "ENOENT", "ENOTDIR", "ESTALE", "EIO"]) {
+      await t.test(`${method} ${targetKind}: ${code}`, async (t) => {
+        const root = await fs.realpath(await temporaryRoot(t));
+        const library = path.join(root, "external");
+        const nested = path.join(library, ".archive");
+        const file = path.join(nested, "media.mp4");
+        await fs.mkdir(nested, { recursive: true });
+        await fs.writeFile(file, "media");
+        const targetPath = targetKind === "root" ? library : targetKind === "nested" ? nested : file;
+        const original = fs[method].bind(fs);
+        t.mock.method(fs, method, async (target, ...args) => {
+          if (target === targetPath) throw Object.assign(new Error(`${code}: ${method}`), { code });
+          return original(target, ...args);
+        });
+        assert.deepEqual(await inspectThemeStorage(library), {
+          path: library, available: false, bytes: 0, themeCount: 0,
+        });
+      });
+    }
+  }
+});
+
+test("storage reads keep invalid preferences, linked roots, and non-directories fail-closed", async (t) => {
+  const root = await temporaryRoot(t);
+  const preference = path.join(root, "theme-storage.json");
+  await fs.writeFile(preference, "{");
+  await assert.rejects(() => readThemeStoragePreference(preference, root), SyntaxError);
+  await fs.writeFile(preference, JSON.stringify({ schemaVersion: 1, libraryRoot: "relative" }));
+  await assert.rejects(() => readThemeStoragePreference(preference, root), /invalid/);
+  const file = path.join(root, "file");
+  const link = path.join(root, "linked");
+  await fs.writeFile(file, "not a directory");
+  await fs.symlink(root, link, process.platform === "win32" ? "junction" : "dir");
+  for (const [libraryRoot, message] of [[file, /must be a directory/], [link, /symbolic link/]]) {
+    await fs.writeFile(preference, JSON.stringify({ schemaVersion: 1, libraryRoot }));
+    await assert.rejects(() => readThemeStoragePreference(preference, root), message);
+    await assert.rejects(() => inspectThemeStorage(libraryRoot), message);
+  }
+});
+
+test("unexpected filesystem errors propagate from preference reads and storage scans", async (t) => {
+  const root = await fs.realpath(await temporaryRoot(t));
+  const library = path.join(root, "library");
+  const preference = path.join(root, "theme-storage.json");
+  await fs.mkdir(library);
+  await writeThemeStoragePreference(preference, library);
+  const failure = Object.assign(new TypeError("unexpected filesystem failure"), { code: "ERR_INVALID_ARG_TYPE" });
+  const original = fs.readdir.bind(fs);
+  t.mock.method(fs, "readdir", async (target, ...args) => {
+    if (target === library) throw failure;
+    return original(target, ...args);
+  });
+  await assert.rejects(() => readThemeStoragePreference(preference, root), (error) => error === failure);
+  await assert.rejects(() => inspectThemeStorage(library), (error) => error === failure);
+});
+
+test("storage write and migration permissions remain strict", async (t) => {
+  const root = await fs.realpath(await temporaryRoot(t));
+  const source = path.join(root, "source");
+  const destination = path.join(root, "destination");
+  const preference = path.join(root, "theme-storage.json");
+  await fs.mkdir(path.join(source, ".deleted"), { recursive: true });
+  await fs.mkdir(destination);
+  const original = fs.lstat.bind(fs);
+  const failure = Object.assign(new Error("permission denied"), { code: "EPERM" });
+  t.mock.method(fs, "lstat", async (target, ...args) => {
+    if (target === path.join(source, ".deleted")) throw failure;
+    return original(target, ...args);
+  });
+  await assert.rejects(() => writeThemeStoragePreference(preference, path.join(source, ".deleted")),
+    (error) => error === failure);
+  await assert.rejects(() => migrateThemeLibrary({ sourceRoot: source, destinationRoot: destination }),
+    (error) => error === failure);
+  await assert.rejects(() => fs.stat(preference), { code: "ENOENT" });
 });
 
 test("migration validates copied themes before old copies are removed", async (t) => {

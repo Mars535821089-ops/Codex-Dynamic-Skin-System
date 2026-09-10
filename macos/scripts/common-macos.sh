@@ -165,6 +165,18 @@ operation_token_is_valid() {
     | LC_ALL=C /usr/bin/grep -Eq '^[0-9]{1,12}:[0-9]{13}:[0-9]{1,8}$'
 }
 
+operation_token_is_current() {
+  local operation_token="${1:-}"
+  local current_token=""
+  operation_token_is_valid "$operation_token" || return 1
+  [ -f "$OPERATION_STATE_PATH" ] || return 1
+  current_token="$(/usr/bin/plutil -extract operationToken raw -o - "$OPERATION_STATE_PATH" 2>/dev/null)" \
+    || return 1
+  [ "$current_token" = "$operation_token" ]
+}
+
+# Returns 0 when published, 2 when a newer operation owns the terminal state,
+# and 1 for an invalid request or an actual storage/locking failure.
 write_operation_state() {
   local status="$1"
   local message="${2:-}"
@@ -1011,7 +1023,7 @@ ensure_node_runtime() {
 # owner perform the injection. A separate --once process used to overwrite the
 # live watcher with a library-incomplete payload, leaving two generations to
 # fight over the same renderer and causing recurring theme flashes.
-# Returns 0 on success, 1 if CDP is not ready (caller should full-start).
+# Returns 0 when applied or superseded, 1 when the caller should full-start.
 hot_reapply_theme() {
   local port="${1:-9341}"
   local timeout_ms="${2:-8000}"
@@ -1019,6 +1031,7 @@ hot_reapply_theme() {
   local inj_pid=""
   local started_at=""
   local codex_pid=""
+  local completion_result=0
 
   # A generic HTTP listener is not enough for a hot re-apply: only use the
   # endpoint already verified as belonging to the official Codex process.
@@ -1042,8 +1055,10 @@ hot_reapply_theme() {
     return 1
   fi
   mark_state_active || return 1
-  write_operation_state success "$(dreamskin_text skin_applied)" "$operation_token" || return 1
-  return 0
+  write_operation_state success "$(dreamskin_text skin_applied)" "$operation_token" \
+    || completion_result=$?
+  # An accepted newer operation must not trigger the caller's full-start path.
+  case "$completion_result" in 0|2) return 0 ;; *) return 1 ;; esac
 }
 
 # Verification must reconstruct exactly the payload owned by the watcher. Keep

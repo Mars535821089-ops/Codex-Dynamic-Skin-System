@@ -9,6 +9,11 @@ import { loadInstalledSkin } from "../assets/dynamic/theme-loader.mjs";
 
 const execFileAsync = promisify(execFile);
 const CLIENT_OPTIONS = Object.freeze({ platform: "macos", clientVersion: "2.0.0" });
+const TRANSIENT_STORAGE_ERROR_CODES = new Set(["EACCES", "EPERM", "ENOENT", "ENOTDIR", "ESTALE", "EIO"]);
+
+export function isTransientThemeStorageError(error) {
+  return TRANSIENT_STORAGE_ERROR_CODES.has(error?.code);
+}
 
 function isWithin(parent, candidate) {
   const relative = path.relative(parent, candidate);
@@ -52,8 +57,16 @@ export async function readThemeStoragePreference(preferencePath, fallbackRoot) {
     throw new Error("Theme storage preference is invalid");
   }
   const configuredRoot = path.resolve(parsed.libraryRoot);
-  const root = await optionalDirectory(configuredRoot);
-  return { root, configuredRoot: root ?? configuredRoot, available: Boolean(root), custom: true };
+  try {
+    const root = await existingDirectory(configuredRoot, "Theme library");
+    // A background process may be allowed to stat an external directory while
+    // macOS privacy permissions still deny scandir. Probe the operation we need.
+    await fs.readdir(root);
+    return { root, configuredRoot, available: true, custom: true };
+  } catch (error) {
+    if (!isTransientThemeStorageError(error)) throw error;
+    return { root: null, configuredRoot, available: false, custom: true };
+  }
 }
 
 export async function writeThemeStoragePreference(preferencePath, libraryRoot) {
@@ -93,24 +106,23 @@ async function walkStorage(root) {
 
 export async function inspectThemeStorage(libraryRoot) {
   if (!libraryRoot) return { path: null, available: false, bytes: 0, themeCount: 0 };
-  let root;
   try {
-    root = await existingDirectory(libraryRoot, "Theme library");
+    const root = await existingDirectory(libraryRoot, "Theme library");
+    let themeCount = 0;
+    for (const entry of await fs.readdir(root, { withFileTypes: true })) {
+      if (!entry.isDirectory() || entry.isSymbolicLink() || entry.name.startsWith(".")) continue;
+      try {
+        const loaded = await loadInstalledSkin(path.join(root, entry.name), CLIENT_OPTIONS);
+        if (loaded.sourceApiVersion === 2) themeCount += 1;
+      } catch {}
+    }
+    return { path: root, available: true, bytes: await walkStorage(root), themeCount };
   } catch (error) {
-    if (error?.code === "ENOENT") {
+    if (isTransientThemeStorageError(error)) {
       return { path: path.resolve(libraryRoot), available: false, bytes: 0, themeCount: 0 };
     }
     throw error;
   }
-  let themeCount = 0;
-  for (const entry of await fs.readdir(root, { withFileTypes: true })) {
-    if (!entry.isDirectory() || entry.isSymbolicLink() || entry.name.startsWith(".")) continue;
-    try {
-      const loaded = await loadInstalledSkin(path.join(root, entry.name), CLIENT_OPTIONS);
-      if (loaded.sourceApiVersion === 2) themeCount += 1;
-    } catch {}
-  }
-  return { path: root, available: true, bytes: await walkStorage(root), themeCount };
 }
 
 async function copyAndValidateTheme(source, destinationRoot) {

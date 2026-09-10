@@ -15,20 +15,28 @@ record_start_exit() {
   local code="$1"
   local line="$2"
   local current_session=""
+  local publication_result=0
   [ -z "${VERIFY_OUTPUT:-}" ] || /bin/rm -f "$VERIFY_OUTPUT"
   [ "$code" -ne 0 ] || return 0
   [ "$OPERATION_FINISHED" != "true" ] || return 0
   [ -n "${OPERATION_TOKEN:-}" ] || return 0
   ensure_state_root 2>/dev/null || true
-  if [ -f "$STATE_PATH" ] && [ -n "${NODE:-}" ]; then
-    current_session="$(state_field session 2>/dev/null || true)"
-    [ "$current_session" != "applying" ] || mark_state_stale 2>/dev/null || true
-  fi
   printf '%s exit=%s line=%s\n' "$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ')" "$code" "$line" \
     >> "$START_ERROR_LOG" 2>/dev/null || true
-  write_operation_state failed "$(dreamskin_text apply_unconfirmed)" "${OPERATION_TOKEN:-}" 2>/dev/null || true
-  finish_client_operation "${PORT:-9341}" error "$(dreamskin_text apply_unconfirmed)" \
-    "$OPERATION_TOKEN" 1500 >/dev/null 2>&1 || true
+  # A failed older start must not stale or notify a newer operation. Keep the
+  # original error in the log even when ownership cannot be read safely.
+  if operation_token_is_current "$OPERATION_TOKEN"; then
+    write_operation_state failed "$(dreamskin_text apply_unconfirmed)" "$OPERATION_TOKEN" 2>/dev/null \
+      || publication_result=$?
+    if [ "$publication_result" -ne 2 ] && operation_token_is_current "$OPERATION_TOKEN"; then
+      if [ -f "$STATE_PATH" ] && [ -n "${NODE:-}" ]; then
+        current_session="$(state_field session 2>/dev/null || true)"
+        [ "$current_session" != "applying" ] || mark_state_stale 2>/dev/null || true
+      fi
+      finish_client_operation "${PORT:-9341}" error "$(dreamskin_text apply_unconfirmed)" \
+        "$OPERATION_TOKEN" 1500 >/dev/null 2>&1 || true
+    fi
+  fi
   printf 'ChatGPT Dream Skin: start failed at line %s (exit %s). See %s\n' "$line" "$code" "$START_ERROR_LOG" >&2
 }
 trap 'code=$?; record_start_exit "$code" "$LINENO"' EXIT
@@ -244,7 +252,13 @@ fi
 cleanup_verify_output
 
 mark_state_active || fail "Could not commit the verified active skin state."
+completion_result=0
 write_operation_state success "$(dreamskin_text skin_applied)" "$OPERATION_TOKEN" \
-  || fail "Could not publish the completed apply state."
+  || completion_result=$?
+case "$completion_result" in
+  0) ;;
+  2) OPERATION_FINISHED="true"; exit 0 ;;
+  *) fail "Could not publish the completed apply state." ;;
+esac
 OPERATION_FINISHED="true"
 printf 'ChatGPT Dream Skin %s is active on loopback port %s.\n' "$SKIN_VERSION" "$PORT"
