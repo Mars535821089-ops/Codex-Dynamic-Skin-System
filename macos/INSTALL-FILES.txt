@@ -129,6 +129,7 @@ tests/restore-lifecycle-transaction.test.sh
 tests/run-tests.sh
 tests/runtime-css-nested-has.test.mjs
 tests/safe-css-validator.test.mjs
+tests/selected-theme-resolution.test.mjs
 tests/shell-braced-vars-before-cjk.test.mjs
 tests/state-persistence.test.sh
 tests/static-payload-assets.test.mjs

@@ -10,6 +10,8 @@
   <string>Codex Theme Launcher</string>
   <key>CFBundleExecutable</key>
   <string>CodexThemeLauncher</string>
+  <key>CFBundleIconFile</key>
+  <string>CodexThemeLauncher.icns</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>

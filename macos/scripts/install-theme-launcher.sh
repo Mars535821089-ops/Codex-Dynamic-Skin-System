@@ -53,8 +53,32 @@ if [ "$desktop" = true ] && { [ -e "$shortcut" ] || [ -L "$shortcut" ]; }; then
 fi
 if [ "$dock" = true ]; then
   case "$codex_app" in /*.app) ;; *) fail '--dock requires --codex-app with the exact official app path.' ;; esac
+fi
+if [ -n "$codex_app" ]; then
+  case "$codex_app" in /*.app) ;; *) fail '--codex-app must be an absolute .app path.' ;; esac
   [ "$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$codex_app/Contents/Info.plist" 2>/dev/null || true)" = com.openai.codex ] \
     || fail 'The specified official app is not Codex.'
+fi
+if [ -z "$codex_app" ]; then
+  for candidate in "/Applications/ChatGPT.app" "/Applications/Codex.app" \
+    "$HOME/Applications/ChatGPT.app" "$HOME/Applications/Codex.app"; do
+    if [ -f "$candidate/Contents/Info.plist" ] \
+      && [ "$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$candidate/Contents/Info.plist" 2>/dev/null || true)" = com.openai.codex ]; then
+      codex_app="$candidate"
+      break
+    fi
+  done
+fi
+icon_source=""
+if [ -n "$codex_app" ]; then
+  for candidate in "$codex_app/Contents/Resources/app.icns" \
+    "$codex_app/Contents/Resources/icon-chatgpt.icns" \
+    "$codex_app/Contents/Resources/electron.icns"; do
+    if [ -f "$candidate" ] && [ ! -L "$candidate" ]; then
+      icon_source="$candidate"
+      break
+    fi
+  done
 fi
 /bin/mkdir -p "$applications_dir" "$state_dir"
 staging="$(/usr/bin/mktemp -d "$applications_dir/.cdss-install.XXXXXX")"
@@ -78,8 +102,10 @@ cleanup() {
   exit "$code"
 }
 trap cleanup EXIT
-/bin/bash "$script_root/build-theme-launcher.sh" --engine-root "$engine_root" \
-  --port "$port" --output "$staging/Codex Theme Launcher.app" >/dev/null
+builder_arguments=(--engine-root "$engine_root" --port "$port" \
+  --output "$staging/Codex Theme Launcher.app")
+[ -z "$icon_source" ] || builder_arguments+=(--icon-source "$icon_source")
+/bin/bash "$script_root/build-theme-launcher.sh" "${builder_arguments[@]}" >/dev/null
 "$staging/Codex Theme Launcher.app/Contents/MacOS/CodexThemeLauncher" --check >/dev/null
 phase="prepare file installer"
 /usr/bin/xcrun swiftc "$script_root/../integration/LauncherFiles.swift" -o "$staging/launcher-files"

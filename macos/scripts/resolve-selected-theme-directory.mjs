@@ -9,6 +9,11 @@ import { readThemeSelection, themeSelectionPath } from "./theme-selection-store.
 import { readThemeStoragePreference, themeStoragePreferencePath } from "./theme-storage-actions.mjs";
 
 const CLIENT_OPTIONS = Object.freeze({ platform: "macos", clientVersion: "2.0.0" });
+const TRANSIENT_LIBRARY_ERRORS = new Set(["EACCES", "EPERM", "ENOENT", "ENOTDIR", "ESTALE", "EIO"]);
+
+export function isTransientThemeLibraryError(error) {
+  return TRANSIENT_LIBRARY_ERRORS.has(error?.code);
+}
 
 async function matchingThemeDirectory(libraryRoot, themeId) {
   const rootStat = await fs.lstat(libraryRoot);
@@ -42,12 +47,19 @@ export async function resolveSelectedThemeDirectory({
   const selectionFile = themeSelectionPath({ settingsPath, themeLibrary: defaultThemeLibrary });
   const selection = await readThemeSelection(selectionFile);
   if (!selection) return fallback;
-  const preference = await readThemeStoragePreference(
-    themeStoragePreferencePath({ settingsPath, themeLibrary: defaultThemeLibrary }),
-    defaultThemeLibrary,
-  );
-  if (!preference.available || !preference.root) return fallback;
-  return await matchingThemeDirectory(preference.root, selection.themeId) ?? fallback;
+  try {
+    const preference = await readThemeStoragePreference(
+      themeStoragePreferencePath({ settingsPath, themeLibrary: defaultThemeLibrary }),
+      defaultThemeLibrary,
+    );
+    if (!preference.available || !preference.root) return fallback;
+    return await matchingThemeDirectory(preference.root, selection.themeId) ?? fallback;
+  } catch (error) {
+    // A mounted external volume can still be unreadable to a background
+    // LaunchAgent. Keep using the last validated staged theme and retry later.
+    if (isTransientThemeLibraryError(error)) return fallback;
+    throw error;
+  }
 }
 
 function parseArguments(argv) {

@@ -70,6 +70,21 @@ test("builder creates a separate application and does not execute the engine", n
   assert.deepEqual((await fs.readdir(path.dirname(app))).sort(), ["Codex Theme Launcher.app"]);
 });
 
+test("builder embeds a caller-supplied local icon without requiring a repository asset", native, async () => {
+  const root = await temporaryDirectory();
+  const app = path.join(root, "Icon Launcher.app");
+  const icon = path.join(root, "local.icns");
+  const bytes = Buffer.from("fixture local icon");
+  await fs.writeFile(icon, bytes);
+  const result = await run("/bin/bash", [builder, "--engine-root", path.join(root, "engine"),
+    "--output", app, "--icon-source", icon]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(await fs.readFile(path.join(app, "Contents/Resources/CodexThemeLauncher.icns")), bytes);
+  const key = await run("/usr/bin/plutil", ["-extract", "CFBundleIconFile", "raw", "-o", "-",
+    path.join(app, "Contents/Info.plist")]);
+  assert.equal(key.stdout.trim(), "CodexThemeLauncher.icns");
+});
+
 test("the compiled executable honors the app's advertised macOS 12 deployment target", native, async () => {
   const app = await baseApp();
   const result = await run("/usr/bin/xcrun", ["vtool", "-show-build", path.join(app, "Contents/MacOS/CodexThemeLauncher")]);
