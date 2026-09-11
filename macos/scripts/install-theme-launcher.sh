@@ -105,6 +105,9 @@ trap cleanup EXIT
 builder_arguments=(--engine-root "$engine_root" --port "$port" \
   --output "$staging/Codex Theme Launcher.app")
 [ -z "$icon_source" ] || builder_arguments+=(--icon-source "$icon_source")
+if [ -d "$target" ]; then
+  builder_arguments+=(--preserve-signature-from "$target")
+fi
 /bin/bash "$script_root/build-theme-launcher.sh" "${builder_arguments[@]}" >/dev/null
 "$staging/Codex Theme Launcher.app/Contents/MacOS/CodexThemeLauncher" --check >/dev/null
 phase="prepare file installer"

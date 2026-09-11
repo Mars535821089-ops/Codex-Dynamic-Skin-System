@@ -117,6 +117,7 @@ tests/injector-launchd-policy.test.mjs
 tests/installer-preflight.test.sh
 tests/launchd-start-guard.test.mjs
 tests/launcher-install.test.mjs
+tests/launcher-signature.test.mjs
 tests/operation-completion.test.mjs
 tests/operation-ui-ordering.test.mjs
 tests/payload-template-integrity.test.mjs

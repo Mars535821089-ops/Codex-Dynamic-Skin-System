@@ -87,12 +87,25 @@ Click **Codex Theme Launcher** for subsequent starts, including after reboot:
 - Failure is reported without automatic retries or Codex restarts. Quitting
   Codex does not cause the launcher to reopen it.
 
-The launcher is a separate, clearly named, locally built app. The builder uses
-an available macOS code-signing identity so privacy approval remains attached
-to the same app across rebuilds; without one, it falls back to ad-hoc signing.
-On the first signed launch macOS may still require one explicit **Allow** click,
-but subsequent launches and rebuilds made with the same identity should retain
-that approval. The launcher has its own Dock identity; a running official Codex may appear separately.
+The launcher is a separate, clearly named, locally built app. On a first install,
+the builder uses an available macOS code-signing identity; without one, it falls
+back to ad-hoc signing. An existing ad-hoc launcher may also upgrade to a signed
+one when a certificate becomes available.
+
+When updating a certificate-signed launcher, the installer keeps its exact
+signing certificate and designated requirement. If that identity or private key
+is unavailable, signing fails and the installed app stays unchanged. An update
+cannot silently use another identity or fall back to ad-hoc signing. Restore the
+original signing certificate and private key in Keychain before retrying. Direct
+builder users must pass `--preserve-signature-from "/absolute/path/Existing.app"`
+when producing an update; `--sign-identity` or `CDSS_CODESIGN_IDENTITY`, if also
+set, must specify the same certificate's SHA-1 hash.
+
+On the first signed launch macOS may still require one explicit **Allow** click.
+Keeping the signing identity stable prevents rebuilds from changing the app's
+identity; actual approval persistence still requires checking a later launch.
+These build checks do not grant or inspect macOS privacy permissions. The
+launcher has its own Dock identity; a running official Codex may appear separately.
 It is not registered to start Codex at login. Directly opening the original app
 from Finder, Spotlight, a deep link, or system session restoration bypasses the
 launcher. An already-running plain Codex remains plain until you choose to quit
