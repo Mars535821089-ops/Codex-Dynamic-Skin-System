@@ -56,6 +56,8 @@ async function fixture(scriptBody = "printf '%s\\0' \"$@\" >> \"$root/arguments\
     const result = await run("/usr/bin/plutil", [...args, plist]);
     assert.equal(result.code, 0, result.stderr);
   }
+  const resigned = await run("/usr/bin/codesign", ["--force", "--timestamp=none", "--sign", "-", app]);
+  assert.equal(resigned.code, 0, resigned.stderr);
   return { root, engine, start, app, plist, binary: path.join(app, "Contents/MacOS/CodexThemeLauncher") };
 }
 
@@ -68,6 +70,16 @@ test("builder creates a separate application and does not execute the engine", n
   const result = await run("/usr/bin/plutil", ["-extract", "CFBundleIdentifier", "raw", "-o", "-", path.join(app, "Contents/Info.plist")]);
   assert.equal(result.stdout.trim(), "io.github.codex-dynamic-skin-system.launcher");
   assert.deepEqual((await fs.readdir(path.dirname(app))).sort(), ["Codex Theme Launcher.app"]);
+});
+
+test("builder uses a stable code-signing identity when one is available", native, async (t) => {
+  const identities = await run("/usr/bin/security", ["find-identity", "-v", "-p", "codesigning"]);
+  if (!/\b[0-9A-F]{40}\b/.test(identities.stdout)) t.skip("no local code-signing identity");
+  const app = await baseApp();
+  const details = await run("/usr/bin/codesign", ["-dvvv", app]);
+  assert.equal(details.code, 0, details.stderr);
+  assert.doesNotMatch(details.stderr, /Signature=adhoc/);
+  assert.match(details.stderr, /TeamIdentifier=(?!not set\b).+/);
 });
 
 test("builder embeds a caller-supplied local icon without requiring a repository asset", native, async () => {

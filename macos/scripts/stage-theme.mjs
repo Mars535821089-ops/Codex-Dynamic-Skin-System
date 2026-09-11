@@ -120,26 +120,30 @@ async function main() {
       clientVersion: "1.5.17",
     });
     if (loaded.sourceApiVersion !== 2) throw new Error("Theme config did not load as Skin API v2");
-    const files = new Map();
+    const payloadFiles = new Map();
+    const snapshotPaths = [
+      ...loaded.declaredFiles,
+      ...(loaded.contentManifest ? ["content-manifest.json"] : []),
+    ].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
     const snapshotDigest = createHash("sha256");
-    for (const relativePath of loaded.declaredFiles) {
+    for (const relativePath of snapshotPaths) {
       const file = await readStableFile(
         path.join(sourceRoot, ...relativePath.split("/")),
         `Theme file ${relativePath}`,
         THEME_LIMITS.singleEntryBytes,
       );
-      files.set(relativePath, file.bytes);
+      if (relativePath !== "content-manifest.json") {
+        payloadFiles.set(relativePath, file.bytes);
+      }
       snapshotDigest.update(relativePath, "utf8").update("\0").update(file.bytes).update("\0");
+      await writeTreeFile(stageRoot, relativePath, file.bytes);
     }
     if (snapshotDigest.digest("hex") !== loaded.fingerprint) {
       throw new Error("Theme changed while its complete v2 tree was being staged");
     }
-    for (const [relativePath, bytes] of files) {
-      await writeTreeFile(stageRoot, relativePath, bytes);
-    }
     process.stdout.write(JSON.stringify({
       schemaVersion: 2,
-      contentFingerprint: runtimeThemeTreeFingerprint(theme, files, { includeId: true }),
+      contentFingerprint: runtimeThemeTreeFingerprint(theme, payloadFiles, { includeId: true }),
     }));
     return;
   }

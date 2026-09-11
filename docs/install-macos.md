@@ -77,8 +77,12 @@ Click **Codex Theme Launcher** for subsequent starts, including after reboot:
 - Failure is reported without automatic retries or Codex restarts. Quitting
   Codex does not cause the launcher to reopen it.
 
-The launcher is a separate, clearly named, locally built and ad-hoc-signed app.
-It has its own Dock identity; a running official Codex may appear separately.
+The launcher is a separate, clearly named, locally built app. The builder uses
+an available macOS code-signing identity so privacy approval remains attached
+to the same app across rebuilds; without one, it falls back to ad-hoc signing.
+On the first signed launch macOS may still require one explicit **Allow** click,
+but subsequent launches and rebuilds made with the same identity should retain
+that approval. The launcher has its own Dock identity; a running official Codex may appear separately.
 It is not registered to start Codex at login. Directly opening the original app
 from Finder, Spotlight, a deep link, or system session restoration bypasses the
 launcher. An already-running plain Codex remains plain until you choose to quit

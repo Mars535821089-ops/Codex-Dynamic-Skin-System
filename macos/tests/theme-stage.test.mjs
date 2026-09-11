@@ -4,6 +4,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { makeV2Package } from "../../tools/tests/helpers/theme-fixtures.mjs";
+import {
+  buildContentManifest,
+  writeContentManifest,
+} from "../assets/dynamic/content-manifest.mjs";
+import { loadInstalledSkin } from "../assets/dynamic/theme-loader.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const macosRoot = path.resolve(here, "..");
@@ -115,6 +120,32 @@ try {
       `staged v2 file must match its stable source snapshot: ${relativePath}`,
     );
   }
+
+  const manifestFixture = await makeV2Package(path.join(tempRoot, "themes"), "dynamic-v2-manifest");
+  await fs.rm(path.join(manifestFixture.root, "manifest.json"));
+  const loadedManifestFixture = await loadInstalledSkin(manifestFixture.root, {
+    platform: "macos",
+    clientVersion: "2.0.0",
+  });
+  const contentManifest = await buildContentManifest(
+    manifestFixture.root,
+    loadedManifestFixture.declaredFiles,
+  );
+  await writeContentManifest(path.join(manifestFixture.root, "content-manifest.json"), contentManifest);
+  const manifestStage = path.join(tempRoot, "v2-manifest-stage");
+  await fs.mkdir(manifestStage);
+  const manifestIdentity = JSON.parse(await runStage(manifestFixture.root, manifestStage));
+  assert.equal(manifestIdentity.schemaVersion, 2);
+  assert.deepEqual(
+    await fs.readFile(path.join(manifestStage, "content-manifest.json")),
+    await fs.readFile(path.join(manifestFixture.root, "content-manifest.json")),
+    "staged v2 package must retain its verified content manifest",
+  );
+  const verifiedManifestStage = await loadInstalledSkin(manifestStage, {
+    platform: "macos",
+    clientVersion: "2.0.0",
+  });
+  assert.equal(verifiedManifestStage.contentManifest?.versionId, contentManifest.versionId);
 
   console.log("PASS: theme staging snapshots complete v1 and v2 themes with stable content fingerprints.");
 } finally {
