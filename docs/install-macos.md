@@ -43,6 +43,12 @@ the repair path can replace only the watcher; it is not allowed to restart or
 reactivate Codex. An intentional paused state is preserved. Uninstall removes
 the monitor together with its state and logs.
 
+Watcher recovery uses the actual port of the confirmed Codex process, not a
+previous session's saved port. A new process run does not inherit the previous
+run's recovery cooldown. Brief connection failures are retried with backoff;
+eight consecutive discovery failures release the watcher so the monitor can
+replace it. A successful discovery with no open windows is not a crash.
+
 ## One-click themed launch (Dock / Desktop)
 
 After installing the updated engine, build the independent launcher with the
@@ -61,9 +67,13 @@ bash ./macos/scripts/install-theme-launcher.sh --desktop --dock --codex-app "/Ap
 ```
 
 Use the actual path on your machine; some installations use a different app name.
-The installer checks the bundle identity, replaces only matching pinned tiles,
-retains their positions, saves a private rollback plist, and refreshes **Dock
-only**, not Codex. Unrelated applications and Desktop items are preserved.
+The installer checks the bundle identity and replaces one matching pinned tile
+in place. If the exact launcher is already pinned once, it keeps that tile and
+removes the redundant official shortcut instead of adding another launcher.
+Ambiguous duplicates are rejected. It saves a private rollback plist and
+refreshes **Dock only**, not Codex. Unrelated applications and Desktop items
+are preserved; restoring the backup recovers removed shortcuts without
+overwriting subsequently added unrelated icons.
 No Dock entry is added if there is no matching pinned tile; drag the installed
 launcher to Dock in that case.
 

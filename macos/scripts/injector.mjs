@@ -1811,6 +1811,15 @@ export function nextDiscoveryPollState(previous = {}, outcome) {
   if (outcome === "healthy") return { transportFailures: 0, delayMs: 100 };
   if (outcome === "transport-error") {
     const transportFailures = (previous.transportFailures ?? 0) + 1;
+    // A live process without any reachable CDP endpoint must not mask a failed
+    // watcher forever. Transient outages get >90 seconds of bounded backoff;
+    // after that the existing watcher-only supervisor can recover ownership.
+    // Healthy discovery (including an empty window list) resets this budget.
+    if (transportFailures >= 8) {
+      throw Object.assign(new Error("CDP discovery remained unavailable; stopping the failed watcher"), {
+        code: "CDP_DISCOVERY_UNAVAILABLE",
+      });
+    }
     return { transportFailures, delayMs: exponentialBackoff(1_000, transportFailures) };
   }
   throw new TypeError(`Unsupported renderer discovery outcome: ${outcome}`);
@@ -3909,13 +3918,45 @@ export async function runWatch(options, {
   }
 }
 
+export function oneShotHardDeadlineMs(options = {}) {
+  const requested = Number(options.timeoutMs);
+  const bounded = Number.isFinite(requested) ? Math.max(250, requested) : 20_000;
+  // Profile readiness is separately bounded to ten seconds. Give payload I/O
+  // and renderer verification a small fixed margin, but never let a leaked
+  // CDP/WebSocket handle keep the launcher waiting forever.
+  return Math.min(135_000, bounded + 15_000);
+}
+
 async function runOneShotAndExit(options, mutationLease = null) {
+  let deadlineTimer;
+  let deadlineExpired = false;
+  let terminalError = null;
+  const deadlineError = Object.assign(new Error(
+    `One-shot injector exceeded its ${oneShotHardDeadlineMs(options)} ms wall-clock deadline`,
+  ), { code: "ONE_SHOT_DEADLINE" });
+  const deadline = new Promise((_, reject) => {
+    deadlineTimer = setTimeout(() => {
+      deadlineExpired = true;
+      reject(deadlineError);
+    }, oneShotHardDeadlineMs(options));
+  });
   try {
-    await runOneShot(options);
+    await Promise.race([runOneShot(options), deadline]);
     await new Promise((resolve) => process.stdout.write("", resolve));
+  } catch (error) {
+    terminalError = error;
   } finally {
+    clearTimeout(deadlineTimer);
     await mutationLease?.release();
   }
+  // A timed-out CDP operation may still own a native WebSocket handle. The
+  // deadline is a terminal CLI failure, so force process teardown after the
+  // mutation lease has been released instead of relying on event-loop drain.
+  if (deadlineExpired) {
+    console.error(`[dream-skin] ${deadlineError.message}`);
+    process.exit(124);
+  }
+  if (terminalError) throw terminalError;
   process.exit(process.exitCode ?? 0);
 }
 

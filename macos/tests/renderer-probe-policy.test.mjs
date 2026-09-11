@@ -6,10 +6,17 @@ import {
   nextDiscoveryPollState,
   nextOwnershipProbeState,
   nextRequestPollState,
+  oneShotHardDeadlineMs,
   probeLoadedThemeOwnership,
   shouldAdoptLoadedTheme,
   steadyStateWatchDelay,
 } from "../scripts/injector.mjs";
+
+test("one-shot verification has a bounded wall-clock deadline", () => {
+  assert.equal(oneShotHardDeadlineMs({ timeoutMs: 20_000 }), 35_000);
+  assert.equal(oneShotHardDeadlineMs({ timeoutMs: 120_000 }), 135_000);
+  assert.equal(oneShotHardDeadlineMs({ timeoutMs: Number.NaN }), 35_000);
+});
 
 test("steady injected sessions use a quiet outer discovery cadence", () => {
   assert.equal(steadyStateWatchDelay(1, 1), 2_000);
@@ -41,17 +48,28 @@ test("watcher restart adopts an identical healthy theme without rebuilding it", 
   assert.equal(shouldAdoptLoadedTheme({ ...healthy, dynamicRootCount: 0 }, current), false);
 });
 
-test("renderer discovery failures back off to a quiet 30 second ceiling", () => {
+test("transient renderer discovery failures back off and a successful probe resets the budget", () => {
   let state = nextDiscoveryPollState({}, "transport-error");
   assert.ok(state.delayMs >= 1_000);
-  for (let index = 0; index < 20; index += 1) {
+  for (let index = 0; index < 6; index += 1) {
     state = nextDiscoveryPollState(state, "transport-error");
   }
   assert.equal(state.delayMs, 30_000);
-  assert.equal(state.transportFailures, 21);
+  assert.equal(state.transportFailures, 7);
   assert.deepEqual(nextDiscoveryPollState(state, "healthy"), {
     transportFailures: 0,
     delayMs: 100,
+  });
+  assert.equal(nextDiscoveryPollState(nextDiscoveryPollState(state, "healthy"), "transport-error").transportFailures, 1);
+});
+
+test("persistent discovery loss exits the watcher instead of reporting an alive but unusable injector", () => {
+  let state = {};
+  for (let attempt = 0; attempt < 7; attempt += 1) {
+    state = nextDiscoveryPollState(state, "transport-error");
+  }
+  assert.throws(() => nextDiscoveryPollState(state, "transport-error"), {
+    code: "CDP_DISCOVERY_UNAVAILABLE",
   });
 });
 

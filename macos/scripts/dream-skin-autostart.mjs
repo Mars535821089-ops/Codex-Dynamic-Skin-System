@@ -41,12 +41,14 @@ export function classifyCodexProcesses(listing, executable) {
     const port = Number(portMatch?.[1]);
     const compliant = REQUIRED_FLAGS.every((flag) => hasExactFlag(line, flag))
       && Number.isInteger(port) && port >= 1024 && port <= 65535;
-    return [{ pid, compliant }];
+    return [{ pid, compliant, port }];
   });
   return {
     pids: entries.map(({ pid }) => pid),
     compliantPids: entries.filter(({ compliant }) => compliant).map(({ pid }) => pid),
     plainPids: entries.filter(({ compliant }) => !compliant).map(({ pid }) => pid),
+    portsByPid: Object.fromEntries(entries.filter(({ compliant }) => compliant)
+      .map(({ pid, port }) => [pid, port])),
   };
 }
 
@@ -211,9 +213,12 @@ export function decideAutostartAction(
     return { action: "wait", reason: "restart-latched" };
   }
   const attemptAge = Number.isFinite(state?.lastAttemptAt) ? now - state.lastAttemptAt : Infinity;
-  const sameProcessRun = state?.observedStopped !== true;
-  if (sameProcessRun && state?.lastAttemptPid === pid
-      && state?.lastResult === "running" && attemptAge < cooldownMs) {
+  // An unobserved quit/reopen must not inherit another process run's cooldown.
+  // Legacy state without a start time keeps the conservative same-PID guard.
+  const sameProcessRun = state?.observedStopped !== true && state?.lastAttemptPid === pid
+    && !(Number.isFinite(state?.lastAttemptStartedAtMs) && Number.isFinite(snapshot.appStartedAtMs)
+      && state.lastAttemptStartedAtMs !== snapshot.appStartedAtMs);
+  if (sameProcessRun && state?.lastResult === "running" && attemptAge < cooldownMs) {
     return { action: "wait", reason: "attempted-pid" };
   }
   if (sameProcessRun && Number.isFinite(state?.lastAttemptAt) && attemptAge < cooldownMs) {
@@ -222,8 +227,13 @@ export function decideAutostartAction(
   return { action: repairWatcher ? "repair-watcher" : "restart", pid };
 }
 
-export function correctionArguments(action) {
-  if (action === "repair-watcher") return ["--repair-watcher-only"];
+export function correctionArguments(action, port) {
+  if (action === "repair-watcher") {
+    if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+      throw new Error("Watcher repair requires a confirmed CDP port");
+    }
+    return ["--repair-watcher-only", "--port", String(port)];
+  }
   if (action === "restart") return ["--restart-existing"];
   throw new Error(`Unknown correction action: ${action}`);
 }
@@ -289,8 +299,8 @@ async function processStartedAt(pid) {
   return Number.isFinite(timestamp) ? timestamp : null;
 }
 
-async function runCorrection(startScript, action, sessionsRoot) {
-  const args = [startScript, ...correctionArguments(action)];
+async function runCorrection(startScript, action, sessionsRoot, port) {
+  const args = [startScript, ...correctionArguments(action, port)];
   if (action === "restart") {
     args.push(
       "--auto-restart-idle-only",
@@ -432,28 +442,33 @@ async function main() {
     } else if (["restart", "repair-watcher"].includes(decision.action)) {
       await sleep(options.graceMs);
       const confirmed = classifyCodexProcesses(await processListing(), options.executable);
+      const confirmedStartedAtMs = confirmed.pids.length === 1 && confirmed.pids[0] === decision.pid
+        ? await processStartedAt(decision.pid)
+        : null;
+      const sameConfirmedRun = Number.isFinite(appStartedAtMs)
+        && confirmedStartedAtMs === appStartedAtMs;
+      const confirmedPort = confirmed.portsByPid[decision.pid];
       const supervisorStillEnabled = !(await pathExists(options.disabledMarker));
       const confirmedWatcherState = confirmed.pids.length === 1
         ? await probeWatcherState(options.statusScript, decision.pid)
         : "unhealthy";
-      const correctionStillRequired = supervisorStillEnabled && (
+      const correctionStillRequired = supervisorStillEnabled && sameConfirmedRun && (
         decision.action === "restart"
           ? confirmed.plainPids.includes(decision.pid) && confirmed.compliantPids.length === 0
             && confirmedWatcherState === "unhealthy"
           : confirmed.compliantPids.includes(decision.pid)
+            && confirmedPort === classified.portsByPid[decision.pid]
             && confirmedWatcherState === "unhealthy"
       );
       if (correctionStillRequired) {
         const attemptedAt = Date.now();
         if (decision.action === "restart") {
-          const startedAt = await processStartedAt(decision.pid);
-          const activity = startedAt === null
-            ? { status: "unknown", activeCount: 0 }
-            : await probeSessionActivity(options.sessionsRoot, startedAt);
+          const activity = await probeSessionActivity(options.sessionsRoot, confirmedStartedAtMs);
           const permission = decidePlainLaunchCorrection(activity);
           if (!permission.allowRestart) {
             await writeState(options.statePath, {
               lastAttemptPid: decision.pid,
+              lastAttemptStartedAtMs: confirmedStartedAtMs,
               lastAttemptAt: attemptedAt,
               lastResult: permission.reason,
               observedStopped: false,
@@ -467,15 +482,17 @@ async function main() {
         await writeState(options.statePath, {
           lastAction: decision.action,
           lastAttemptPid: decision.pid,
+          lastAttemptStartedAtMs: confirmedStartedAtMs,
           lastAttemptAt: attemptedAt,
           lastResult: "running",
           observedStopped: false,
         });
         console.log(`[dream-skin-autostart] ${decision.action} pid=${decision.pid}`);
-        const exitCode = await runCorrection(options.startScript, decision.action, options.sessionsRoot);
+        const exitCode = await runCorrection(options.startScript, decision.action, options.sessionsRoot, confirmedPort);
         await writeState(options.statePath, {
           lastAction: decision.action,
           lastAttemptPid: decision.pid,
+          lastAttemptStartedAtMs: confirmedStartedAtMs,
           lastAttemptAt: attemptedAt,
           lastResult: exitCode === 0 ? "ok" : "failed",
           observedStopped: false,

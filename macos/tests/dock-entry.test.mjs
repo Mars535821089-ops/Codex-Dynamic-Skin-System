@@ -35,10 +35,12 @@ function tile(id, app, bundle = 'com.openai.codex') {
 async function run(entries, extra = [], { xml = false } = {}) {
   const dir = await fs.mkdtemp(path.join(root, 'case-'));
   const input = path.join(dir, 'before.plist'), output = path.join(dir, 'after.plist');
+  const backup = path.join(dir, 'operation-backup.plist');
   await fs.writeFile(input, xml ? entries : JSON.stringify({ 'persistent-apps': entries, unrelated: 'keep' }));
   const convert = spawnSync('/usr/bin/plutil', ['-convert', 'xml1', input], { encoding: 'utf8' });
   assert.equal(convert.status, 0, convert.stderr);
-  const result = spawnSync(binary, ['--input', input, '--output', output, '--target', official, '--launcher', launcher, ...extra], { encoding: 'utf8' });
+  const result = spawnSync(binary, ['--input', input, '--output', output, '--target', official, '--launcher', launcher,
+    ...(!extra.includes('--backup') ? ['--backup', backup] : []), ...extra], { encoding: 'utf8' });
   let value;
   if (result.status === 0 && xml) {
     const valid = spawnSync('/usr/bin/plutil', ['-lint', output], { encoding: 'utf8' });
@@ -48,7 +50,7 @@ async function run(entries, extra = [], { xml = false } = {}) {
     assert.equal(converted.status, 0, converted.stderr);
     value = JSON.parse(converted.stdout);
   }
-  return { result, value, input, output };
+  return { result, value, input, output, backup };
 }
 
 function extractXML(plist, key) {
@@ -79,6 +81,85 @@ test('second installation is a no-op and does not create duplicate icons', { ski
   assert.equal(second.result.status, 0, second.result.stderr);
   assert.equal(JSON.parse(second.result.stdout).changed, 0);
   assert.deepEqual(second.value, first.value);
+});
+test('multiple official tiles without an existing launcher are rejected before output or backup', { skip: !mac }, async () => {
+  const result = await run([tile(2, official), tile(3, official)]);
+  assert.notEqual(result.result.status, 0);
+  assert.match(result.result.stderr, /ambiguous|multiple|official/i);
+  assert.equal(await fs.access(result.output).then(() => true, () => false), false);
+  assert.equal(await fs.access(result.backup).then(() => true, () => false), false);
+});
+test('an existing exact launcher keeps its GUID and position without creating another launcher', { skip: !mac }, async () => {
+  const pinned = tile(10, launcher, 'io.github.codex-dynamic-skin-system.launcher');
+  const other = tile(11, path.join(root, 'Other.app'), 'example.other');
+  const first = await run([pinned, tile(12, official), other]);
+  assert.equal(first.result.status, 0, first.result.stderr);
+  assert.deepEqual(first.value['persistent-apps'], [pinned, other]);
+  assert.equal(JSON.parse(first.result.stdout).changed, 1);
+  const second = await run(first.value['persistent-apps']);
+  assert.equal(second.result.status, 0, second.result.stderr);
+  assert.equal(JSON.parse(second.result.stdout).changed, 0);
+  assert.deepEqual(second.value, first.value);
+});
+test('deduplicated official tiles restore their original GUIDs and relative order around later additions', { skip: !mac }, async () => {
+  const pinned = tile(10, launcher, 'io.github.codex-dynamic-skin-system.launcher');
+  const left = tile(11, path.join(root, 'Left.app'), 'example.left');
+  const right = tile(14, path.join(root, 'Right.app'), 'example.right');
+  const originals = [tile(12, official), tile(13, official)];
+  const first = await run([left, originals[0], pinned, originals[1], right]);
+  assert.equal(first.result.status, 0, first.result.stderr);
+  assert.deepEqual(first.value['persistent-apps'], [left, pinned, right]);
+  const added = tile(30, path.join(root, 'New.app'), 'example.new');
+  const addedLauncher = tile(31, launcher, 'io.github.codex-dynamic-skin-system.launcher');
+  const restored = await run([added, left, pinned, right, addedLauncher], ['--restore', '--backup', first.backup]);
+  assert.equal(restored.result.status, 0, restored.result.stderr);
+  assert.deepEqual(restored.value['persistent-apps'], [added, left, originals[0], pinned, originals[1], right, addedLauncher]);
+  const repeated = await run(restored.value['persistent-apps'], ['--restore', '--backup', first.backup]);
+  assert.equal(repeated.result.status, 0, repeated.result.stderr);
+  assert.equal(JSON.parse(repeated.result.stdout).changed, 0);
+  assert.deepEqual(repeated.value, restored.value);
+});
+test('deduplication leaves similar, remote and unidentified entries untouched', { skip: !mac }, async () => {
+  const pinned = tile(10, launcher, 'io.github.codex-dynamic-skin-system.launcher');
+  const similar = tile(11, path.join(root, 'Another Theme Launcher.app'), 'io.github.codex-dynamic-skin-system.launcher');
+  const remote = tile(12, launcher, 'io.github.codex-dynamic-skin-system.launcher');
+  remote['tile-data']['file-data']._CFURLString = pathToFileURL(launcher + '/').href.replace('file:///', 'file://remote.invalid/');
+  const unidentified = tile(13, launcher, 'example.unrelated');
+  const first = await run([pinned, similar, remote, tile(14, official), unidentified]);
+  assert.equal(first.result.status, 0, first.result.stderr);
+  assert.deepEqual(first.value['persistent-apps'], [pinned, similar, remote, unidentified]);
+});
+test('deduplication rejects multiple exact launchers and a launcher GUID shared by an unrelated item', { skip: !mac }, async () => {
+  const pinned = tile(10, launcher, 'io.github.codex-dynamic-skin-system.launcher');
+  for (const collision of [tile(11, launcher, 'io.github.codex-dynamic-skin-system.launcher'),
+    tile(10, path.join(root, 'Other.app'), 'example.other')]) {
+    const result = await run([pinned, collision, tile(12, official)]);
+    assert.notEqual(result.result.status, 0);
+    assert.match(result.result.stderr, /GUID|ambiguous|launcher/i);
+    assert.equal(await fs.access(result.output).then(() => true, () => false), false);
+  }
+});
+test('deduplication restore refuses a reused official GUID or reversed surviving anchors', { skip: !mac }, async () => {
+  const pinned = tile(10, launcher, 'io.github.codex-dynamic-skin-system.launcher');
+  const right = tile(12, path.join(root, 'Right.app'), 'example.right');
+  const first = await run([pinned, tile(11, official), right]);
+  assert.equal(first.result.status, 0, first.result.stderr);
+  for (const entries of [
+    [pinned, tile(11, path.join(root, 'User Added.app'), 'example.new'), right],
+    [right, pinned],
+  ]) {
+    const restored = await run(entries, ['--restore', '--backup', first.backup]);
+    assert.notEqual(restored.result.status, 0);
+    assert.match(restored.result.stderr, /GUID|anchor|order|ambiguous/i);
+    assert.equal(await fs.access(restored.output).then(() => true, () => false), false);
+  }
+});
+test('legacy backups do not resurrect an official tile whose converted launcher the user removed', { skip: !mac }, async () => {
+  const pinned = tile(10, launcher, 'io.github.codex-dynamic-skin-system.launcher');
+  const legacy = await run([pinned, tile(11, official)]);
+  const result = await run([pinned], ['--restore', '--backup', legacy.input]);
+  assert.equal(result.result.status, 0, result.result.stderr);
+  assert.deepEqual(result.value['persistent-apps'], [pinned]);
 });
 test('a same-path tile with different bundle identity is not changed', { skip: !mac }, async () => {
   const entry = tile(8, official, 'example.unrelated');
@@ -139,6 +220,19 @@ test('restore still rejects ambiguous original GUIDs in a backup', { skip: !mac 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /exactly one|ambiguous/i);
   assert.equal(await fs.access(output).then(() => true, () => false), false);
+});
+test('restore rejects an original GUID that also belongs to an unrelated backup entry', { skip: !mac }, async () => {
+  const original = tile(4, official);
+  const first = await run([original]);
+  const collision = tile(4, path.join(root, 'Unrelated.app'), 'example.unrelated');
+  const backup = path.join(path.dirname(first.input), 'conflicting-backup.plist');
+  await fs.writeFile(backup, JSON.stringify({ 'persistent-apps': [original, collision] }));
+  const converted = spawnSync('/usr/bin/plutil', ['-convert', 'xml1', backup], { encoding: 'utf8' });
+  assert.equal(converted.status, 0, converted.stderr);
+  const result = await run(first.value['persistent-apps'], ['--restore', '--backup', backup]);
+  assert.notEqual(result.result.status, 0);
+  assert.match(result.result.stderr, /GUID|ambiguous/i);
+  assert.equal(await fs.access(result.output).then(() => true, () => false), false);
 });
 test('binary bookmark Data survives untouched tiles and backup restoration', { skip: !mac }, async () => {
   const bookmark = 'AAECA//+gA==';

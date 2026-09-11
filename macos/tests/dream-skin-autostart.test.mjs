@@ -61,7 +61,12 @@ import { EventEmitter } from "node:events";
 import { syncBuiltinESMExports } from "node:module";
 import { PassThrough } from "node:stream";
 const statuses = JSON.parse(process.env.TEST_STATUSES);
+const snapshots = JSON.parse(process.env.TEST_PROCESS_SNAPSHOTS || "null");
+const startedTimes = JSON.parse(process.env.TEST_STARTED_TIMES || "null");
+const defaultStarted = new Date(Date.now() - Number(process.env.TEST_APP_AGE_MS)).toISOString();
 let statusIndex = 0;
+let snapshotIndex = 0;
+let startedTimeIndex = 0;
 childProcess.spawn = (command, args) => {
   fs.appendFileSync(process.env.TEST_CALLS, JSON.stringify({ command, args }) + "\n");
   const child = new EventEmitter();
@@ -71,10 +76,14 @@ childProcess.spawn = (command, args) => {
     let output = "";
     let code = 0;
     if (command === "/bin/ps" && args[0] === "-axo") {
-      output = "42 /fixture/Codex.app/Contents/MacOS/Codex" +
-        (process.env.TEST_CDP === "1" ? " --remote-debugging-address=127.0.0.1 --remote-debugging-port=9341" : "") + "\n";
+      const snapshot = snapshots?.[Math.min(snapshotIndex++, snapshots.length - 1)]
+        ?? { pid: 42, port: process.env.TEST_CDP === "1" ? 9341 : null };
+      output = snapshot.pid + " /fixture/Codex.app/Contents/MacOS/Codex" +
+        (snapshot.port ? " --remote-debugging-address=127.0.0.1 --remote-debugging-port=" + snapshot.port : "") + "\n";
     } else if (command === "/bin/ps" && args[0] === "-p") {
-      output = new Date(Date.now() - Number(process.env.TEST_APP_AGE_MS)).toISOString() + "\n";
+      output = (startedTimes
+        ? startedTimes[Math.min(startedTimeIndex++, startedTimes.length - 1)] ?? ""
+        : defaultStarted) + "\n";
     } else if (command === "/bin/bash" && args[0] === process.env.TEST_STATUS) {
       output = JSON.stringify(statuses[Math.min(statusIndex++, statuses.length - 1)]) + "\n";
     } else if (command !== "/bin/bash" || args[0] !== process.env.TEST_START) {
@@ -109,6 +118,8 @@ syncBuiltinESMExports();
           TEST_CDP: cdp ? "1" : "0",
           TEST_STATUSES: JSON.stringify(round.statuses),
           TEST_APP_AGE_MS: String(round.appAgeMs ?? 60_000),
+          TEST_PROCESS_SNAPSHOTS: JSON.stringify(round.processSnapshots ?? null),
+          TEST_STARTED_TIMES: JSON.stringify(round.startedTimes ?? null),
         },
       });
       const calls = (await fsp.readFile(callsPath, "utf8")).trim().split("\n").filter(Boolean).map(JSON.parse);
@@ -178,7 +189,7 @@ for (const expiredOperation of ["failed", ""]) {
     assert.equal(results[0].starts.length, 0);
     assert.deepEqual(results[0].state, initialState, "busy must not renew the repair cooldown");
     assert.equal(results[1].starts.length, 1, "expiration must not leave a permanent busy latch");
-    assert.deepEqual(results[1].starts[0].args.slice(1), ["--repair-watcher-only"]);
+    assert.deepEqual(results[1].starts[0].args.slice(1), ["--repair-watcher-only", "--port", "9341"]);
     assert.equal(results[1].state.lastResult, "ok");
   });
 }
@@ -191,16 +202,74 @@ test("CLI grants a new compliant app startup grace and repairs after that grace"
   assert.equal(results[0].starts.length, 0);
   assert.equal(results[0].state, null);
   assert.equal(results[1].starts.length, 1);
-  assert.deepEqual(results[1].starts[0].args.slice(1), ["--repair-watcher-only"]);
+  assert.deepEqual(results[1].starts[0].args.slice(1), ["--repair-watcher-only", "--port", "9341"]);
 });
 
 test("CLI still repairs an ordinary dead watcher and never restarts a plain app by default", async () => {
   const [broken] = await runMonitorFixture();
   assert.equal(broken.starts.length, 1);
-  assert.deepEqual(broken.starts[0].args.slice(1), ["--repair-watcher-only"]);
+  assert.deepEqual(broken.starts[0].args.slice(1), ["--repair-watcher-only", "--port", "9341"]);
   const [plain] = await runMonitorFixture({ cdp: false });
   assert.equal(plain.starts.length, 0);
 });
+
+test("CLI repairs on the confirmed process port instead of the persisted port", async () => {
+  const startedAt = "Tue Sep  8 01:00:00 2026";
+  const [result] = await runMonitorFixture({
+    initialState: { schemaVersion: 1, port: 9341 },
+    rounds: [{ statuses: [inactiveStatus], processSnapshots: [{ pid: 42, port: 9342 }], startedTimes: [startedAt] }],
+  });
+  assert.deepEqual(result.starts[0].args.slice(1), ["--repair-watcher-only", "--port", "9342"]);
+  assert.equal(result.state.lastAttemptStartedAtMs, Date.parse(startedAt));
+});
+
+for (const pid of [42, 84]) {
+  test(`CLI persists the new run identity for PID ${pid} and only repairs that run once during cooldown`, async () => {
+    const startedAt = "Tue Sep 8 01:00:00 2026";
+    const round = { statuses: [inactiveStatus], processSnapshots: [{ pid, port: 9342 }], startedTimes: [startedAt] };
+    const results = await runMonitorFixture({
+      rounds: [round, round],
+      initialState: {
+        schemaVersion: 1, lastAttemptPid: 42, lastAttemptStartedAtMs: Date.parse("Mon Sep 7 01:00:00 2026"),
+        lastAttemptAt: Date.now() - 1000, lastResult: "failed", observedStopped: false,
+      },
+    });
+    assert.deepEqual(results[0].starts.map((call) => call.args.slice(1)),
+      [["--repair-watcher-only", "--port", "9342"]]);
+    assert.equal(results[0].state.lastAttemptPid, pid);
+    assert.equal(results[0].state.lastAttemptStartedAtMs, Date.parse(startedAt));
+    assert.equal(results[1].starts.length, 0);
+    assert.deepEqual(results[1].state, results[0].state);
+  });
+}
+
+for (const [change, round] of Object.entries({
+  port: { processSnapshots: [{ pid: 42, port: 9342 }, { pid: 42, port: 9343 }] },
+  PID: { processSnapshots: [{ pid: 42, port: 9342 }, { pid: 84, port: 9342 }] },
+  "start time": { startedTimes: ["Tue Sep  8 01:00:00 2026", "Tue Sep  8 02:00:00 2026"] },
+  "unreadable start time": { startedTimes: [null] },
+})) {
+  test(`CLI cancels watcher repair when confirmation detects ${change}`, async () => {
+    const [result] = await runMonitorFixture({ rounds: [{ statuses: [inactiveStatus], ...round }] });
+    assert.equal(result.starts.length, 0);
+    assert.notEqual(result.state?.lastResult, "ok");
+  });
+}
+
+for (const [description, pid, startedAt, expected] of [
+  ["a new PID", 84, now - 20_000, { action: "repair-watcher", pid: 84 }],
+  ["a reused PID with a different start time", 42, now - 20_000, { action: "repair-watcher", pid: 42 }],
+  ["the same confirmed run", 42, now - 60_000, { action: "wait", reason: "cooldown" }],
+]) {
+  test(`cooldown is bound to process identity for ${description}`, () => {
+    assert.deepEqual(decideAutostartAction(snapshot({
+      pids: [pid], compliantPids: [pid], watcherState: "unhealthy", appStartedAtMs: startedAt,
+    }), {
+      lastAction: "repair-watcher", lastAttemptPid: 42, lastAttemptStartedAtMs: now - 60_000,
+      lastAttemptAt: now - 1000, lastResult: "failed", observedStopped: false,
+    }, now, cooldown), expected);
+  });
+}
 
 test("loopback CDP is sufficient and background anti-throttling remains optional", () => {
   const executable = "/Applications/Codex.app/Contents/MacOS/Codex";
@@ -226,6 +295,7 @@ test("loopback CDP is sufficient and background anti-throttling remains optional
     pids: [42, 47, 43, 46],
     compliantPids: [42, 47],
     plainPids: [43, 46],
+    portsByPid: { 42: 9341, 47: 9341 },
   });
 });
 
@@ -481,7 +551,10 @@ test("watcher status distinguishes a healthy watcher, an intentional pause, and 
 });
 
 test("watcher repair is structurally unable to request a Codex restart", () => {
-  assert.deepEqual(correctionArguments("repair-watcher"), ["--repair-watcher-only"]);
+  assert.deepEqual(correctionArguments("repair-watcher", 9342), ["--repair-watcher-only", "--port", "9342"]);
+  for (const invalidPort of [undefined, 0, 1023, 65536, "9342"]) {
+    assert.throws(() => correctionArguments("repair-watcher", invalidPort), /port/u);
+  }
   assert.deepEqual(correctionArguments("restart"), ["--restart-existing"]);
   assert.throws(() => correctionArguments("anything-else"), /Unknown correction action/u);
 

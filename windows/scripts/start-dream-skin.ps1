@@ -313,7 +313,8 @@ try {
       $restartHistory.RestartLatched = $true
       $restartHistory.LastAttemptAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
       Write-DreamSkinAutostartRestartState -StateRoot $StateRoot -State $restartHistory
-      Stop-DreamSkinCodex -Codex $codexToStop -ExpectedProcessId $ExpectedCodexPid -ExpectedStartedAt $ExpectedCodexStartedAt
+      Stop-DreamSkinCodex -Codex $codexToStop -ProfilePath $ProfilePath `
+        -ExpectedProcessId $ExpectedCodexPid -ExpectedStartedAt $ExpectedCodexStartedAt
     } else {
       Stop-DreamSkinCodex -Codex $codexToStop -ProfilePath $ProfilePath -AllowForce
     }
